@@ -19,6 +19,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import announce
+import backup_service
 import config
 import keyboards as kb
 from database import Database
@@ -143,6 +144,7 @@ async def channel_add_chat(message: Message, db: Database, state: FSMContext, bo
         await message.answer("ℹ️ Bu kanal allaqachon ulangan.")
         return
     await state.clear()
+    backup_service.request_backup("e'lon kanali ulandi")
     await message.answer(f"✅ «{html.escape(chat.title or '')}» ulandi.", reply_markup=kb.main_menu(is_admin=True))
     text, markup = await _channel_view(db, channel_id)
     await message.answer(text, reply_markup=markup)

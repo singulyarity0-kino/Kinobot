@@ -67,8 +67,88 @@ async def _run_search(message: Message, state: FSMContext, query: str) -> None:
     )
 
 
+@router.callback_query(AddAnimeStates.waiting_source, F.data == "al:gemini")
+async def al_gemini(call: CallbackQuery, state: FSMContext, db: Database):
+    """Gemini nom bo'yicha ma'lumot TAKLIF qiladi; admin ko'rib tasdiqlamaguncha hech narsa saqlanmaydi."""
+    if not gemini.is_configured():
+        await call.answer("Gemini kaliti ulanmagan.", show_alert=True)
+        return
+    data = await state.get_data()
+    title = data.get("new_title", "")
+    await call.answer()
+    wait = await call.message.answer(f"🤖 Gemini «{html.escape(title)}» haqida ma'lumot izlamoqda…")
+    genres = await db.list_genres()
+    info = await gemini.describe_movie(title, [g["name"] for g in genres])
+    if not info:
+        await wait.edit_text(
+            "😕 Gemini bu nomni ishonchli tanimadi (yoki limit tugadi). Inglizcha asl nomini yozib ko'ring yoki qo'lda kiriting.",
+            reply_markup=kb.anilist_source_keyboard(),
+        )
+        return
+    await state.update_data(gm_info=info)
+    lines = [
+        "🤖 <b>Gemini taklifi</b> — ma'lumotlar TAXMINIY, aniqligini tekshiring:",
+        "",
+        f"🎬 {html.escape(str(info.get('title') or title))}" + (f" ({html.escape(str(info['year']))})" if info.get("year") else ""),
+    ]
+    if info.get("country"):
+        lines.append(f"🌍 Davlat: {html.escape(str(info['country']))}")
+    if info.get("director"):
+        lines.append(f"🎬 Rejissyor: {html.escape(str(info['director']))}")
+    if info.get("actors"):
+        lines.append(f"👥 Aktyorlar: {html.escape(str(info['actors']))}")
+    if info.get("duration"):
+        lines.append(f"⏱ Davomiylik: {html.escape(str(info['duration']))}")
+    if info.get("age_rating"):
+        lines.append(f"🔞 Yosh chegarasi (taklif): {info['age_rating']}")
+    if info.get("genres"):
+        lines.append("🎭 Janr: " + ", ".join(info["genres"]))
+    if info.get("description"):
+        lines += ["", html.escape(info["description"])]
+    lines += ["", "ℹ️ Poster olinmaydi — keyin «🖼 Poster» orqali qo'shasiz."]
+    await wait.edit_text("\n".join(lines), reply_markup=kb.gemini_confirm_keyboard())
+
+
+@router.callback_query(AddAnimeStates.waiting_source, F.data == "al:gm_ok")
+async def al_gemini_ok(call: CallbackQuery, state: FSMContext, db: Database, bot: Bot):
+    data = await state.get_data()
+    info = data.get("gm_info")
+    if not info:
+        await call.answer("Taklif eskirgan. Qaytadan urinib ko'ring.", show_alert=True)
+        return
+    await call.answer()
+    genres = await db.list_genres()
+    genre_ids = tmdb.match_genre_ids(info.get("genres") or [], genres)
+    extra = {"kind": "series" if info.get("is_series") else "movie"}
+    for key in ("duration", "age_rating", "director", "actors"):
+        if info.get(key):
+            extra[key] = str(info[key])
+    year = str(info.get("year") or "")
+    await state.update_data(
+        anilist_id=None,
+        al_extra=extra,
+        new_description=html.escape(info.get("description") or "", quote=False),
+        new_poster=None,
+        al_country=info.get("country") or None,
+        al_year=year if year.isdigit() else None,
+        selected_genres=genre_ids,
+        gm_info=None,
+    )
+    names = {g["id"]: g["name"] for g in genres}
+    await state.set_state(AddAnimeStates.waiting_genres)
+    await bot.send_message(
+        call.message.chat.id,
+        "✅ Gemini ma'lumotlari qabul qilindi.\n🎭 Janrlarni tekshiring (kerak bo'lsa o'zgartiring), so'ng ✅ Tayyor bosing"
+        + (f"\n(taklif: {', '.join(names[i] for i in genre_ids)})" if genre_ids else "") + ":",
+        reply_markup=kb.genres_menu(genres, selected_ids=set(genre_ids), for_admin_add=True),
+    )
+
+
 @router.callback_query(AddAnimeStates.waiting_source, F.data == "al:search")
 async def al_search(call: CallbackQuery, state: FSMContext):
+    if not tmdb.is_configured():
+        await call.answer("TMDB kaliti ulanmagan.", show_alert=True)
+        return
     data = await state.get_data()
     await call.answer()
     await _run_search(call.message, state, data.get("new_title", ""))
@@ -98,7 +178,7 @@ async def al_manual(call: CallbackQuery, state: FSMContext):
 @router.message(AddAnimeStates.waiting_source)
 async def al_source_wrong(message: Message):
     await message.answer(
-        "👆 Iltimos, yuqoridagi tugmalardan birini tanlang: TMDB'dan to'ldirish yoki qo'lda kiritish.",
+        "👆 Iltimos, yuqoridagi tugmalardan birini tanlang.",
         reply_markup=kb.anilist_source_keyboard(),
     )
 

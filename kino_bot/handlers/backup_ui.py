@@ -134,6 +134,7 @@ async def bk_channel_receive(message: Message, state: FSMContext, db: Database, 
         return
     await db.set_setting("storage_channel_id", str(chat.id))
     await db.set_setting("storage_channel_title", getattr(chat, "title", None) or str(chat.id))
+    backup_service.request_backup("zaxira kanali ulandi")
     await state.clear()
     archived, total = await db.archive_counts()
     extra = (

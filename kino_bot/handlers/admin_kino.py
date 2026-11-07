@@ -50,6 +50,11 @@ FUNNEL_NUMBERS = {
         "Yangi kino oddiy foydalanuvchiga necha soatdan keyin ochiladi? VIP'ga darhol ochiq. (0 = hammaga darhol)",
         0, 720,
     ),
+    "temp_vip_hours": (
+        "⚡ Vaqtinchalik VIP (soat)",
+        "AI chek tekshiruvidan o'tganda necha soatlik vaqtinchalik VIP berilsin? (1–72, tavsiya 12)",
+        1, 72,
+    ),
     "stars_price_1": ("⭐ Stars narxi: 1 oy", "1 oylik VIP necha Telegram Stars (⭐) turadi? (0 = Stars o'chiq)", 0, 100000),
     "stars_price_2": ("⭐ Stars narxi: 2 oy", "2 oylik VIP necha Stars? (0 = o'chiq)", 0, 100000),
     "stars_price_3": ("⭐ Stars narxi: 3 oy", "3 oylik VIP necha Stars? (0 = o'chiq)", 0, 100000),
@@ -66,6 +71,7 @@ FUNNEL_TOGGLES = {
     "preview_enabled": "🎬 Qulflangan kartada treyler",
     "movie_requests_enabled": "📝 Kino so'rash",
     "manual_pay_enabled": "🧾 Kartaga o'tkazib chek yuborish usuli",
+    "ai_receipt_enabled": "🤖 AI chek tekshiruvi (vaqtinchalik VIP)",
     "translate_description": "🌐 Tavsifni o'zbekchaga tarjima qilish",
     "ai_rewrite_description": "🤖 Tavsifni Gemini bilan qiziqarli yozish",
     "ai_channel_hook": "🤖 Kanal postiga Gemini jumlasi",
@@ -88,6 +94,7 @@ async def _funnel_view(db: Database):
         f"⭐ Stars narxlari (1/2/3 oy): <b>{await int_setting(db, 'stars_price_1', 0)} / "
         f"{await int_setting(db, 'stars_price_2', 0)} / {await int_setting(db, 'stars_price_3', 0)}</b>",
         f"🤖 Gemini: <b>{'ulangan' if gemini.is_configured() else 'kalit yo‘q (GEMINI_API_KEY)'}</b>",
+        f"⚡ Vaqtinchalik VIP (AI chek): <b>{await int_setting(db, 'temp_vip_hours', 12)} soat</b>",
         "",
         "Pastdagi tugmalar bilan o'zgartiring:",
     ]

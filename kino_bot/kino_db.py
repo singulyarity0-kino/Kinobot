@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import difflib
+import random
 import re
 from typing import Any, Optional
 
@@ -85,6 +86,14 @@ CREATE TABLE IF NOT EXISTS view_events (
 CREATE INDEX IF NOT EXISTS idx_view_events_anime ON view_events(anime_id);
 CREATE INDEX IF NOT EXISTS idx_view_events_created ON view_events(created_at);
 
+CREATE TABLE IF NOT EXISTS pay_reservations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,                -- telegram_id
+    base        INTEGER NOT NULL,                -- tarif narxi (so'm)
+    amount      INTEGER NOT NULL,                -- noyob summa (narx + 1..99)
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pay_res_created ON pay_reservations(created_at);
 CREATE TABLE IF NOT EXISTS announce_channels (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id          TEXT NOT NULL UNIQUE,
@@ -220,6 +229,16 @@ class KinoDBMixin:
         pcols = {row[1] for row in await cur.fetchall()}
         if "trigger_anime_id" not in pcols:
             await self.conn.execute("ALTER TABLE vip_purchases ADD COLUMN trigger_anime_id INTEGER")
+        cur = await self.conn.execute("PRAGMA table_info(pending_payments)")
+        ppcols = {row[1] for row in await cur.fetchall()}
+        for name, ddl in (
+            ("pay_amount", "INTEGER"),   # foydalanuvchi to'lashi kerak bo'lgan noyob summa
+            ("temp_until", "TEXT"),      # AI tekshiruvi berilgan vaqtinchalik VIP tugash vaqti (UTC)
+            ("receipt_uid", "TEXT"),     # chek rasmining file_unique_id (takroriy chekni aniqlash)
+            ("ai_note", "TEXT"),         # AI tekshiruvi natijasi (adminga ko'rsatiladi)
+        ):
+            if name not in ppcols:
+                await self.conn.execute(f"ALTER TABLE pending_payments ADD COLUMN {name} {ddl}")
 
         # Eski bitta MAIN_CHANNEL ni e'lon kanallari ro'yxatiga bir marta ko'chiramiz
         cur = await self.conn.execute("SELECT COUNT(*) FROM announce_channels")
@@ -843,3 +862,91 @@ class KinoDBMixin:
         cur = await self.conn.execute("SELECT * FROM anime WHERE notified_vip=1 AND notified_free=0 AND is_published=1")
         return await cur.fetchall()
 
+    # ------------------------------------------------------------------ #
+    # 💳 Noyob summa, kutilayotgan to'lovlar, AI tekshiruvi va vaqtinchalik VIP
+    # ------------------------------------------------------------------ #
+    async def reserve_pay_amount(self, telegram_id: int, base_price: int, hours: int = 3) -> int:
+        """
+        Qo'lda to'lov uchun noyob summa beradi: narx + 1..99 so'm. Boshqa foydalanuvchining ochiq
+        rezervi yoki kutilayotgan to'lovi bilan takrorlanmaydi; shu foydalanuvchiga qayta chaqirilsa — o'sha summa.
+        """
+        if base_price <= 0:
+            return base_price
+        cutoff = (datetime.datetime.utcnow() - datetime.timedelta(hours=hours)).isoformat(timespec="seconds")
+        cur = await self.conn.execute(
+            "SELECT amount FROM pay_reservations WHERE user_id=? AND base=? AND created_at>=? ORDER BY id DESC LIMIT 1",
+            (telegram_id, base_price, cutoff),
+        )
+        row = await cur.fetchone()
+        if row:
+            return row["amount"]
+        cur = await self.conn.execute(
+            "SELECT amount FROM pay_reservations WHERE created_at>=? AND user_id<>?", (cutoff, telegram_id)
+        )
+        busy = {r["amount"] for r in await cur.fetchall()}
+        cur = await self.conn.execute(
+            "SELECT pay_amount FROM pending_payments WHERE status='pending' AND pay_amount IS NOT NULL"
+        )
+        busy |= {r["pay_amount"] for r in await cur.fetchall()}
+        free = [base_price + i for i in range(1, 100) if base_price + i not in busy]
+        amount = random.choice(free) if free else base_price + random.randint(1, 99)
+        await self.conn.execute(
+            "INSERT INTO pay_reservations (user_id, base, amount, created_at) VALUES (?,?,?,?)",
+            (telegram_id, base_price, amount, _now()),
+        )
+        await self.conn.execute("DELETE FROM pay_reservations WHERE created_at<?", (cutoff,))
+        await self.conn.commit()
+        return amount
+
+    async def count_pending_payments(self) -> int:
+        cur = await self.conn.execute("SELECT COUNT(*) FROM pending_payments WHERE status='pending'")
+        (n,) = await cur.fetchone()
+        return n
+
+    async def list_pending_payments(self, limit: int = 15) -> list[aiosqlite.Row]:
+        cur = await self.conn.execute(
+            "SELECT p.*, u.telegram_id AS tg_id, u.full_name AS tg_name FROM pending_payments p "
+            "JOIN users u ON u.id=p.user_id WHERE p.status='pending' ORDER BY p.id LIMIT ?",
+            (limit,),
+        )
+        return await cur.fetchall()
+
+    async def receipt_seen(self, receipt_uid: str) -> bool:
+        cur = await self.conn.execute("SELECT 1 FROM pending_payments WHERE receipt_uid=? LIMIT 1", (receipt_uid,))
+        return await cur.fetchone() is not None
+
+    async def user_had_temp_vip(self, telegram_id: int) -> bool:
+        """Foydalanuvchi AI tekshiruvi orqali vaqtinchalik VIP'ni bir marta olganmi."""
+        cur = await self.conn.execute(
+            "SELECT 1 FROM pending_payments p JOIN users u ON u.id=p.user_id "
+            "WHERE u.telegram_id=? AND p.temp_until IS NOT NULL LIMIT 1",
+            (telegram_id,),
+        )
+        return await cur.fetchone() is not None
+
+    async def set_payment_ai(self, payment_id: int, ai_note: str, temp_until: Optional[str]) -> None:
+        await self.conn.execute(
+            "UPDATE pending_payments SET ai_note=?, temp_until=? WHERE id=?", (ai_note, temp_until, payment_id)
+        )
+        await self.conn.commit()
+
+    async def grant_temp_vip(self, telegram_id: int, hours: int) -> Optional[str]:
+        """
+        Vaqtinchalik VIP (daromad hisobiga YOZILMAYDI). Foydalanuvchi allaqachon VIP bo'lsa — None
+        (hech narsa o'zgarmaydi). Aks holda tugash vaqtini (UTC, ISO) qaytaradi.
+        """
+        if await self.is_vip(telegram_id):
+            return None
+        until = (datetime.datetime.utcnow() + datetime.timedelta(hours=hours)).isoformat(timespec="seconds")
+        await self.conn.execute("UPDATE users SET vip_until=? WHERE telegram_id=?", (until, telegram_id))
+        await self.conn.commit()
+        return until
+
+    async def revoke_temp_vip(self, telegram_id: int, temp_until: Optional[str]) -> None:
+        """Vaqtinchalik VIP'ni olib tashlaydi — faqat foydalanuvchida aynan shu muddat turgan bo'lsa (haqiqiy VIP'ga tegmaydi)."""
+        if not temp_until:
+            return
+        await self.conn.execute(
+            "UPDATE users SET vip_until=NULL WHERE telegram_id=? AND vip_until=?", (telegram_id, temp_until)
+        )
+        await self.conn.commit()

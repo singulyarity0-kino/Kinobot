@@ -12,6 +12,7 @@ Kalit yo'q yoki xato bo'lsa funksiyalar None qaytaradi — bot to'xtamaydi, bosh
 """
 from __future__ import annotations
 
+import base64
 import html
 import json
 import logging
@@ -38,16 +39,24 @@ def is_configured() -> bool:
     return bool(_key())
 
 
-async def _generate(prompt: str, system: str, max_tokens: int = 600, temperature: float = 0.6) -> Optional[str]:
+async def _generate(prompt: str, system: str, max_tokens: int = 600, temperature: float = 0.6,
+                    image: Optional[tuple[bytes, str]] = None, json_mode: bool = False) -> Optional[str]:
+    """image = (baytlar, mime) — rasm bilan so'rov (chek tekshiruvi); json_mode — faqat JSON javob."""
     if not is_configured():
         return None
     model = _model()
     gen_cfg: dict = {"maxOutputTokens": max_tokens, "temperature": temperature}
+    if json_mode:
+        gen_cfg["responseMimeType"] = "application/json"
     if "2.5-flash" in model:
         gen_cfg["thinkingConfig"] = {"thinkingBudget": 0}  # fikrlash tokenlari javobni qisqartirib yubormasin
+    user_parts: list = []
+    if image is not None:
+        user_parts.append({"inline_data": {"mime_type": image[1], "data": base64.b64encode(image[0]).decode("ascii")}})
+    user_parts.append({"text": prompt})
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "contents": [{"role": "user", "parts": user_parts}],
         "generationConfig": gen_cfg,
     }
     timeout = aiohttp.ClientTimeout(total=30)
@@ -140,6 +149,78 @@ async def suggest_genres(title: str, text: str, allowed: list[str], limit: int =
         if name and name not in result:
             result.append(name)
     return result[:limit]
+
+
+def _json_obj(text: Optional[str]) -> Optional[dict]:
+    """Javobdan birinchi JSON obyektni ajratib oladi (```json qobig'i bo'lsa ham)."""
+    if not text:
+        return None
+    m = re.search(r"\{.*\}", text, flags=re.S)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+async def verify_receipt(image: bytes, mime: str, expected_amount: int, card_number: str, card_holder: str) -> Optional[dict]:
+    """
+    To'lov cheki rasmini o'qiydi. Qaytadi (yoki None — Gemini ishlamasa):
+    {is_receipt, success, amount, card_tail, date, confidence, notes}
+    """
+    prompt = (
+        "This image should be a payment receipt / transfer screenshot from an Uzbek banking or payment app "
+        "(Click, Payme, Uzum, Humo, UzCard, etc.). Read it carefully and reply with ONE JSON object only:\n"
+        '{"is_receipt": true|false, "success": true|false|null, "amount": integer sum in UZS or null, '
+        '"card_tail": last 4 digits of the RECIPIENT card as string or null, "date": "YYYY-MM-DD" or null, '
+        '"confidence": number 0..1, "notes": "short reason in Uzbek, max 120 chars"}\n'
+        "Rules: amount is the transferred amount in so'm as a plain integer (no spaces, no tiyin). "
+        "is_receipt is false for anything that is not a real payment receipt (selfie, meme, random screenshot, "
+        "edited or suspicious image). success is false if the status shows failed/cancelled/pending. "
+        f"Context: expected amount {expected_amount}, expected recipient card ending {str(card_number)[-4:] or 'unknown'}, "
+        f"holder '{card_holder}'. Do NOT assume the expected values; report only what is visible."
+    )
+    out = await _generate(
+        prompt, "You are a careful payment receipt reader. Reply with JSON only.",
+        max_tokens=300, temperature=0.0, image=(image, mime), json_mode=True,
+    )
+    return _json_obj(out)
+
+
+async def describe_movie(title: str, allowed_genres: list[str]) -> Optional[dict]:
+    """
+    Nom bo'yicha kino ma'lumotlarini taklif qiladi (TMDB o'rniga). Natija TAXMINIY — admin tasdiqlaydi.
+    {title, year, country, director, actors, duration, age_rating, description, genres}
+    """
+    prompt = (
+        f'Movie or series title given by the admin: "{title}".\n'
+        "If you do not confidently recognise this exact title, reply with {\"unknown\": true}.\n"
+        "Otherwise reply with ONE JSON object only:\n"
+        '{"title": "original title", "year": "YYYY", "country": "main country in Uzbek (Latin)", '
+        '"director": "name", "actors": "up to 4 main actors, comma separated", '
+        '"duration": "in Uzbek, e.g. 2 soat 15 daqiqa", "age_rating": one of "0+","6+","12+","16+","18+", '
+        '"description": "engaging Uzbek (Latin) description, 2-3 sentences, max 380 chars, no spoilers", '
+        f'"genres": up to 3 names chosen ONLY from {json.dumps(allowed_genres, ensure_ascii=False)}, '
+        '"is_series": true|false}\n'
+        "Never invent facts: leave a field as an empty string if unsure."
+    )
+    out = await _generate(prompt, _SYS_UZ, max_tokens=700, temperature=0.2, json_mode=True)
+    obj = _json_obj(out)
+    if not obj or obj.get("unknown"):
+        return None
+    by_lower = {a.lower(): a for a in allowed_genres}
+    genres: list[str] = []
+    for g in obj.get("genres") or []:
+        name = by_lower.get(str(g).strip().lower())
+        if name and name not in genres:
+            genres.append(name)
+    obj["genres"] = genres[:3]
+    if obj.get("age_rating") not in ("0+", "6+", "12+", "16+", "18+"):
+        obj["age_rating"] = ""
+    obj["description"] = _cut(str(obj.get("description") or ""), 420) or ""
+    return obj
 
 
 def _cut(text: Optional[str], limit: int) -> Optional[str]:

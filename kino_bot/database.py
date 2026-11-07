@@ -1495,12 +1495,13 @@ class Database(KinoDBMixin):
     # VIP to'lovlari
     # ------------------------------------------------------------------ #
     async def create_pending_payment(self, telegram_id: int, months: int, price: int,
-                                      screenshot_file_id: str) -> int:
+                                      screenshot_file_id: str, pay_amount: Optional[int] = None,
+                                      receipt_uid: Optional[str] = None) -> int:
         user = await self.get_user(telegram_id)
         cur = await self.conn.execute(
-            "INSERT INTO pending_payments (user_id, months, price, screenshot_file_id, created_at) "
-            "VALUES (?,?,?,?,?)",
-            (user["id"], months, price, screenshot_file_id, _now()),
+            "INSERT INTO pending_payments (user_id, months, price, screenshot_file_id, created_at, pay_amount, receipt_uid) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (user["id"], months, price, screenshot_file_id, _now(), pay_amount, receipt_uid),
         )
         await self.conn.commit()
         return cur.lastrowid

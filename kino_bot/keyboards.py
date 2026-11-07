@@ -433,31 +433,80 @@ def profile_keyboard() -> InlineKeyboardMarkup:
 # Admin panel
 # ---------------------------------------------------------------------- #
 
+_pending_badge = 0
+
+
+def set_pending_badge(n: int) -> None:
+    """Admin panelda «💳 To'lovlar» tugmasiga kutilayotgan to'lovlar sonini ko'rsatish uchun."""
+    global _pending_badge
+    _pending_badge = max(0, int(n))
+
+
 def admin_panel_menu() -> InlineKeyboardMarkup:
+    """Bosh admin panel: eng kerakli 5 ta amal tepada, qolganlari 4 ta bo'limga guruhlangan."""
     b = InlineKeyboardBuilder()
     b.button(text="➕ Kino qo'shish", callback_data="adm:add_anime")
     b.button(text="🎬 Kinolar ro'yxati", callback_data="adm:anime_list:0")
-    b.button(text="📚 Mavjud kinoga fasl qo'shish", callback_data="adm:season_pick:0")
+    pay = f"💳 To'lovlar ({_pending_badge})" if _pending_badge else "💳 To'lovlar"
+    b.button(text=pay, callback_data="adm:pay_list")
     b.button(text="👥 Foydalanuvchilar", callback_data="adm:users:0")
-    b.button(text="📊 Statistika", callback_data="adm:stats")
+    b.button(text="📣 Kanallar", callback_data="adm:m:chan")
     b.button(text="📢 Reklama", callback_data="adm:broadcast")
-    b.button(text="📢 Majburiy kanallar", callback_data="adm:channels")
-    b.button(text="💰 VIP narxlari", callback_data="adm:vip_prices")
-    b.button(text="🎁 VIP'ni vaqtincha bepul qilish", callback_data="adm:vip_free_menu")
-    b.button(text="💳 To'lov ma'lumotlari", callback_data="adm:payment_info")
-    b.button(text="🎭 Janrlar", callback_data="adm:genres")
-    b.button(text="💎 VIP voronka", callback_data="adm:funnel")
-    b.button(text="🎞 To'plamlar", callback_data="adm:cols")
-    b.button(text="📝 So'rovlar", callback_data="adm:requests")
-    b.button(text="⚠️ Muammolar", callback_data="adm:reports")
-    b.button(text="📣 E'lon kanallari", callback_data="adm:annch")
-    b.button(text="📈 Kino statistikasi", callback_data="adm:kstats")
-    b.button(text="🎁 Referal", callback_data="adm:ref")
-    b.button(text="🖼 /start rasm/matn", callback_data="adm:start_settings")
-    b.button(text="🆘 Yordam matni", callback_data="adm:help_settings")
-    b.button(text="💾 Zaxira nusxa (Backup)", callback_data="adm:backup_menu")
+    b.button(text="💎 VIP va to'lov", callback_data="adm:m:vip")
+    b.button(text="📊 Statistika", callback_data="adm:stats")
+    b.button(text="🗂 Kontent", callback_data="adm:m:content")
+    b.button(text="⚙️ Sozlamalar", callback_data="adm:m:set")
     b.adjust(2)
     return b.as_markup()
+
+
+def _submenu(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for text, data in items:
+        b.button(text=text, callback_data=data)
+    b.button(text="⬅️ Orqaga", callback_data="adm:panel")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def admin_menu_channels() -> InlineKeyboardMarkup:
+    return _submenu([
+        ("📣 E'lon kanallari (yangi kino, kunlik post)", "adm:annch"),
+        ("➕ E'lon kanali ulash", "adm:annch_add"),
+        ("📢 Majburiy obuna kanallari", "adm:channels"),
+        ("📦 Zaxira kanali (videolar nusxasi)", "adm:bk_channel"),
+        ("🕐 Rejalashtirilgan postlar", "adm:sched_list"),
+    ])
+
+
+def admin_menu_vip() -> InlineKeyboardMarkup:
+    return _submenu([
+        ("💎 VIP voronka (limit, sinov, AI chek)", "adm:funnel"),
+        ("💰 VIP narxlari", "adm:vip_prices"),
+        ("💳 To'lov ma'lumotlari (karta)", "adm:payment_info"),
+        ("🎁 VIP'ni vaqtincha bepul qilish", "adm:vip_free_menu"),
+        ("🎁 Referal", "adm:ref"),
+    ])
+
+
+def admin_menu_content() -> InlineKeyboardMarkup:
+    return _submenu([
+        ("🎭 Janrlar", "adm:genres"),
+        ("🎞 To'plamlar", "adm:cols"),
+        ("📝 Kino so'rovlari", "adm:requests"),
+        ("⚠️ Muammo xabarlari", "adm:reports"),
+        ("📚 Mavjud kinoga fasl qo'shish", "adm:season_pick:0"),
+        ("📈 Kino statistikasi", "adm:kstats"),
+    ])
+
+
+def admin_menu_settings() -> InlineKeyboardMarkup:
+    return _submenu([
+        ("💾 Zaxira nusxa (Backup)", "adm:backup_menu"),
+        ("🖼 /start rasm va matn", "adm:start_settings"),
+        ("🆘 Yordam matni", "adm:help_settings"),
+        ("💎 AI va VIP sozlamalari", "adm:funnel"),
+    ])
 
 
 def admin_back_button(target: str = "adm:panel") -> InlineKeyboardMarkup:
@@ -692,9 +741,42 @@ def backup_settings_keyboard(enabled: bool, interval: int, keep: int) -> InlineK
     return b.as_markup()
 
 
+def _tmdb_on() -> bool:
+    try:
+        import tmdb
+        return bool(tmdb.is_configured())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _gemini_on() -> bool:
+    try:
+        import gemini
+        return bool(gemini.is_configured())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def fill_sources_text() -> str:
+    """Ulangan avto-to'ldirish manbalari nomi (bo'sh — hech biri ulanmagan)."""
+    return " yoki ".join(n for n, on in (("TMDB", _tmdb_on()), ("Gemini", _gemini_on())) if on)
+
+
 def anilist_source_keyboard() -> InlineKeyboardMarkup:
+    """TMDB / Gemini tugmalari faqat kaliti ulangan bo'lsa ko'rinadi."""
     b = InlineKeyboardBuilder()
-    b.button(text="🔎 TMDB'dan to'ldirish", callback_data="al:search")
+    if _tmdb_on():
+        b.button(text="🔎 TMDB'dan to'ldirish", callback_data="al:search")
+    if _gemini_on():
+        b.button(text="🤖 Gemini bilan to'ldirish", callback_data="al:gemini")
+    b.button(text="✍️ Qo'lda kiritish", callback_data="al:manual")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def gemini_confirm_keyboard() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Shu ma'lumotlarni ishlatish", callback_data="al:gm_ok")
     b.button(text="✍️ Qo'lda kiritish", callback_data="al:manual")
     b.adjust(1)
     return b.as_markup()

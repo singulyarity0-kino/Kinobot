@@ -15,6 +15,7 @@ import archive
 import funnel
 import keyboards as kb
 import payments
+import receipt_check
 from database import Database
 from handlers.common import (
     build_anime_card_text,
@@ -823,17 +824,19 @@ async def pay_manual(call: CallbackQuery, db: Database, state: FSMContext):
 async def _start_manual_payment(call: CallbackQuery, db: Database, state: FSMContext, months: int):
     prices, discount = await funnel.get_prices(db, call.from_user.id)
     price = prices.get(months, 0)
+    pay_amount = await db.reserve_pay_amount(call.from_user.id, price)  # narx + 1..99 so'm (noyob)
     card_number = await db.get_setting("payment_card_number", "—")
     card_holder = await db.get_setting("payment_card_holder", "—")
 
     await state.set_state(VipPaymentStates.waiting_screenshot)
-    await state.update_data(vip_months=months, vip_price=price)
+    await state.update_data(vip_months=months, vip_price=price, vip_pay_amount=pay_amount)
 
     discount_line = f"🎉 Chegirma: -{discount}%\n" if discount else ""
     text = (
-        f"💳 <b>{months} oylik VIP — {fmt_number(price)} so'm</b>\n"
+        f"💳 <b>{months} oylik VIP</b>\n"
         f"{discount_line}\n"
-        f"To'lovni quyidagi kartaga amalga oshiring:\n"
+        f"💰 To'lov summasi: <b>{fmt_number(pay_amount)} so'm</b>\n"
+        f"❗ Aynan shu summani o'tkazing (oxirgi raqamlar chekni sizga bog'laydi) — shunda chek avtomatik tekshiriladi.\n\n"
         f"💳 Karta: <code>{card_number}</code>\n"
         f"👤 Egasi: {card_holder}\n\n"
         f"To'lovni amalga oshirgach, chek (screenshot) rasmini shu yerga yuboring 📸"
@@ -846,31 +849,64 @@ async def _start_manual_payment(call: CallbackQuery, db: Database, state: FSMCon
 async def vip_receive_screenshot(message: Message, db: Database, state: FSMContext, bot: Bot):
     data = await state.get_data()
     months = data.get("vip_months")
-    price = data.get("vip_price", "0")
+    price = int(data.get("vip_price", 0) or 0)
+    pay_amount = int(data.get("vip_pay_amount", 0) or price)
     await state.clear()
 
-    screenshot_file_id = message.photo[-1].file_id
-    payment_id = await db.create_pending_payment(message.from_user.id, months, int(price or 0), screenshot_file_id)
-
+    photo = message.photo[-1]
+    tg = message.from_user.id
+    duplicate = await db.receipt_seen(photo.file_unique_id)
+    payment_id = await db.create_pending_payment(
+        tg, months, price, photo.file_id, pay_amount=pay_amount, receipt_uid=photo.file_unique_id
+    )
     user = await ensure_user(db, message.from_user)
-    await message.answer(
-        "✅ Chekingiz qabul qilindi. Admin tasdiqlagach VIP faollashadi. Iltimos kuting.",
-        reply_markup=kb.main_menu(is_admin=bool(user["is_admin"])),
-    )
+    menu = kb.main_menu(is_admin=bool(user["is_admin"]))
 
-    admins_cur = await db.conn.execute("SELECT telegram_id FROM users WHERE is_admin=1")
-    admin_ids = [r["telegram_id"] for r in await admins_cur.fetchall()]
+    # 🤖 AI tekshiruvi: faqat ikkala shart bajarilsa vaqtinchalik VIP (bir marta, takroriy chek emas)
+    temp_until = None
+    ai_note = ""
+    if duplicate:
+        ai_note = "⚠️ Bu chek rasmi avval ham yuborilgan — AI tekshiruvi o'tkazilmadi"
+    elif await db.user_had_temp_vip(tg):
+        ai_note = "ℹ️ Vaqtinchalik VIP bu foydalanuvchiga avval berilgan — AI tekshiruvi o'tkazilmadi"
+    else:
+        wait = await message.answer("🔎 Chekingiz tekshirilmoqda…")
+        verdict = await receipt_check.evaluate(bot, db, photo.file_id, pay_amount)
+        ai_note = verdict.note
+        hours = await funnel.int_setting(db, "temp_vip_hours", 12)
+        if verdict.ok:
+            temp_until = await db.grant_temp_vip(tg, hours)
+        try:
+            await wait.delete()
+        except Exception:
+            pass
+    await db.set_payment_ai(payment_id, ai_note, temp_until)
+
+    if temp_until:
+        hours = await funnel.int_setting(db, "temp_vip_hours", 12)
+        await message.answer(
+            f"✅ Chekingiz avtomatik tekshirildi.\n⚡ Sizga <b>{hours} soatga vaqtinchalik 💎 VIP</b> ochildi.\n"
+            "Admin tasdiqlagach to'liq VIP faollashadi.",
+            reply_markup=menu,
+        )
+    else:
+        await message.answer(
+            "✅ Chekingiz qabul qilindi. Admin tasdiqlagach VIP faollashadi. Iltimos kuting.", reply_markup=menu
+        )
+
     caption = (
-        f"💳 <b>Yangi VIP to'lov</b>\n\n"
+        f"💳 <b>Yangi VIP to'lov</b> (#{payment_id})\n\n"
         f"👤 Foydalanuvchi: {message.from_user.full_name} (@{message.from_user.username or '—'})\n"
-        f"🆔 ID: <code>{message.from_user.id}</code>\n"
+        f"🆔 ID: <code>{tg}</code>\n"
         f"📦 Paket: {months} oylik\n"
-        f"💰 Narx: {fmt_number(price)} so'm"
+        f"💰 Kutilgan summa: <b>{fmt_number(pay_amount)} so'm</b> (tarif {fmt_number(price)})\n"
+        f"{ai_note}"
+        + ("\n⚡ Vaqtinchalik VIP berilgan — rad etsangiz o'zi olib tashlanadi." if temp_until else "")
     )
-    for admin_id in admin_ids:
+    for admin_id in await db.all_admin_ids():
         try:
             await bot.send_photo(
-                admin_id, screenshot_file_id, caption=caption,
+                admin_id, photo.file_id, caption=caption,
                 reply_markup=kb.vip_payment_confirm_keyboard(payment_id),
             )
         except Exception:

@@ -174,6 +174,8 @@ DEFAULT_SETTINGS = {
     "stars_price_1": "0",            # Telegram Stars narxi (yulduz), 0 = shu tarif uchun Stars o'chiq
     "stars_price_2": "0",
     "stars_price_3": "0",
+    "temp_vip_hours": "12",          # AI chek tekshiruvidan o'tganda beriladigan vaqtinchalik VIP muddati (soat)
+    "ai_receipt_enabled": "1",       # Gemini chek rasmini o'qiydi (kalit bo'lsa)
     "ai_rewrite_description": "1",   # Gemini tavsifni o'zbekcha qiziqarli qilib yozadi (kalit bo'lsa)
     "ai_channel_hook": "1",          # Gemini kanal posti uchun jozibali jumla yozadi (kalit bo'lsa)
     # Video zaxira kanali (admin paneldan ulanadi)

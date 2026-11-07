@@ -12,8 +12,10 @@ Baza endi `kino.db` (`DB_PATH`). Eski `anime.db` ni ishlatmoqchi bo'lsangiz `.en
 yangi ustunlar avtomatik qo'shiladi, eski ma'lumotlar saqlanadi.
 
 ## Yangi imkoniyatlar
-**Kino ma'lumotlari.** TMDB'dan avto-to'ldirish (poster, tavsif, yil, davlat, davomiylik, yosh chegarasi, reyting,
-rejissyor, aktyorlar, treyler). Kino sahifasida qo'shimcha maydonlar: 🎬 Rejissyor/aktyor/davomiylik… tugmasi.
+**Kino ma'lumotlari.** Avto-to'ldirish ikki manbadan, qaysi kalit ulangan bo'lsa shu tugma ko'rinadi:
+🔎 TMDB (poster, tavsif, yil, davlat, davomiylik, yosh chegarasi, reyting, rejissyor, aktyorlar, treyler) yoki
+🤖 Gemini (poster'siz; ma'lumotlar TAXMINIY — admin ko'rib «✅ Shu ma'lumotlarni ishlatish» ni bosadi, yosh chegarasi ham taklif sifatida).
+Hech qaysi kalit bo'lmasa — qo'lda kiritiladi. Kino sahifasida qo'shimcha maydonlar: 🎬 Rejissyor/aktyor/davomiylik… tugmasi.
 Kino yoki serial turi (`kind`). Janrlar, davlatlar, kayfiyatlar (🎯 Kashf qilish) kinoga moslangan (`config.py`).
 
 **Avto-tarjima.** TMDB tavsifi (ruscha/inglizcha) o'zbekchaga o'giriladi. Standart: Google (bepul, kalitsiz); `ANTHROPIC_API_KEY` yozsangiz Claude (sifatliroq). Admin panel → 💎 VIP voronka → 🌐 tugmasi bilan o'chiriladi.
@@ -63,6 +65,28 @@ Kalit bo'lmasa yoki limit tugasa bot to'xtamaydi: Google → MyMemory → asl ta
 - **⭐ Telegram Stars:** token kerak emas; admin paneldan har tarif uchun yulduz narxi belgilanadi (0 = o'chiq).
 - **Qo'lda usul** (kartaga o'tkazib chek yuborish) saqlanadi; avtomatik usul ishlagach o'chirib qo'yish mumkin.
 - Har to'lov bir marta hisoblanadi (takroriy xabar VIP'ni ikki marta bermaydi); xato bo'lsa adminlarga xabar boradi.
+
+## 🤖 AI chek tekshiruvi (Gemini kaliti bo'lsa) + noyob summa
+- Qo'lda to'lovda har foydalanuvchiga **noyob summa** beriladi: tarif narxi + 1…99 so'm (3 soat saqlanadi, boshqa
+  foydalanuvchi bilan takrorlanmaydi). Chekdagi summa shunga aynan teng bo'lishi kerak.
+- Gemini chek rasmini o'qiydi: haqiqiy chekmi, status muvaffaqiyatlimi, summa, karta oxiri, sana (±1 kun), ishonch ≥ 0.8.
+- **Hammasi mos bo'lsa** — foydalanuvchiga **vaqtinchalik VIP** (standart 12 soat, 💎 VIP voronka → ⚡ sozlanadi) ochiladi.
+  Daromad statistikasiga yozilmaydi. Doimiy VIP baribir **admin tasdiqlagach** beriladi.
+- Admin **rad etsa** — faqat vaqtinchalik VIP olib tashlanadi (haqiqiy VIP'ga tegilmaydi).
+- **Ishonchsiz bo'lsa / Gemini ishlamasa / limit tugasa** — VIP berilmaydi, chek oddiy tartibda adminga ketadi (sababi izohda).
+- Himoya: vaqtinchalik VIP har foydalanuvchiga **bir marta**; bir xil chek rasmi ikkinchi marta o'tmaydi.
+- Admin panelda 💳 To'lovlar — kutilayotgan cheklar ro'yxati (✅/❌ tugmalari bilan). Funksiyani 💎 VIP voronka'dan o'chirish mumkin.
+- Eslatma: Gemini bepul rejasida Google so'rovlarni mahsulotini yaxshilash uchun ishlatishi mumkin (chek rasmlari ham).
+
+## ⚙️ Admin panel tuzilishi
+Bosh ekranda holat ko'rinadi (kanallar ulanganmi, kutilayotgan to'lovlar, Gemini) va eng kerakli tugmalar:
+➕ Kino qo'shish · 🎬 Kinolar · 💳 To'lovlar · 👥 Foydalanuvchilar · 📣 Kanallar · 📢 Reklama · 💎 VIP va to'lov ·
+📊 Statistika · 🗂 Kontent · ⚙️ Sozlamalar.
+- **📣 Kanallar:** e'lon kanallari (asosiy kanal shu yerdan ulanadi), majburiy obuna, zaxira kanali, rejalashtirilgan postlar.
+- **💎 VIP va to'lov:** voronka, narxlar, karta, bepul VIP rejimi, referal.
+- **🗂 Kontent:** janrlar, to'plamlar, so'rovlar, muammolar, fasl qo'shish, kino statistikasi.
+- **⚙️ Sozlamalar:** zaxira nusxa, /start, yordam matni, AI va VIP sozlamalari.
+- Kanal ulanganda (e'lon / majburiy / zaxira) baza zaxirasi avtomatik so'raladi (≈1 daqiqadan keyin olinadi).
 
 ## 🛡 Obuna tekshiruvi
 Majburiy kanallar natijasi 90 soniya keshlanadi (har xabarda kanallarga so'rov ketmaydi).

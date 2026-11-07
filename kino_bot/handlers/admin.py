@@ -20,6 +20,7 @@ import archive
 import backup_service
 import announce
 import config
+import gemini
 from kino_db import detect_quality
 import keyboards as kb
 from database import Database, validate_sqlite_backup
@@ -86,13 +87,36 @@ async def admin_start_override(message: Message, state: FSMContext, db: Database
 # ------------------------------------------------------------------ #
 # Kirish
 # ------------------------------------------------------------------ #
-@router.message(F.text == "⚙️ Admin panel")
-async def open_admin_panel(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        "⚙️ <b>Admin panel</b>\n\nBo'limni tanlang:",
-        reply_markup=kb.admin_panel_menu(),
+async def _panel_text(db: Database) -> str:
+    """Bosh panel matni: nima ulangan, nima yetishmayotgani birdan ko'rinadi."""
+    pending = await db.count_pending_payments()
+    kb.set_pending_badge(pending)
+    ann = await db.list_announce_channels(only_enabled=True)
+    storage = await archive.get_storage_chat(db)
+    req = await db.list_required_channels()
+    lines = ["⚙️ <b>Admin panel</b>", ""]
+    lines.append(
+        f"📣 E'lon kanali: ✅ {len(ann)} ta" if ann
+        else "📣 E'lon kanali: ❌ ulanmagan → <b>📣 Kanallar</b> bo'limidan ulang"
     )
+    lines.append(f"📢 Majburiy kanallar: {'✅ ' + str(len(req)) + ' ta' if req else '⬜️ yo‘q'}")
+    lines.append("📦 Zaxira kanali: ✅ ulangan" if storage is not None else "📦 Zaxira kanali: ❌ ulanmagan (📣 Kanallar)")
+    lines.append(f"💳 Kutilayotgan to'lovlar: <b>{pending}</b>" if pending else "💳 Kutilayotgan to'lov yo‘q")
+    lines.append("🤖 Gemini: ✅ ulangan" if gemini.is_configured() else "🤖 Gemini: ⬜️ kalit yo‘q (GEMINI_API_KEY)")
+    return "\n".join(lines)
+
+
+async def _show_menu(call: CallbackQuery, text: str, markup) -> None:
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest:
+        await call.message.answer(text, reply_markup=markup)
+
+
+@router.message(F.text == "⚙️ Admin panel")
+async def open_admin_panel(message: Message, state: FSMContext, db: Database):
+    await state.clear()
+    await message.answer(await _panel_text(db), reply_markup=kb.admin_panel_menu())
     await message.answer(
         "Foydalanuvchi paneliga qaytish uchun tugmadan foydalaning 👇",
         reply_markup=kb.admin_back_to_user_menu(),
@@ -100,13 +124,52 @@ async def open_admin_panel(message: Message, state: FSMContext):
 
 
 @router.callback_query(F.data == "adm:panel")
-async def back_to_panel(call: CallbackQuery, state: FSMContext):
+async def back_to_panel(call: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
-    try:
-        await call.message.edit_text("⚙️ <b>Admin panel</b>\n\nBo'limni tanlang:", reply_markup=kb.admin_panel_menu())
-    except TelegramBadRequest:
-        await call.message.answer("⚙️ <b>Admin panel</b>\n\nBo'limni tanlang:", reply_markup=kb.admin_panel_menu())
+    await _show_menu(call, await _panel_text(db), kb.admin_panel_menu())
     await call.answer()
+
+
+_SUBMENUS = {
+    "chan": ("📣 <b>Kanallar</b>\n\nE'lon, majburiy obuna va zaxira kanallari shu yerda.", kb.admin_menu_channels),
+    "vip": ("💎 <b>VIP va to'lov</b>", kb.admin_menu_vip),
+    "content": ("🗂 <b>Kontent</b>", kb.admin_menu_content),
+    "set": ("⚙️ <b>Sozlamalar</b>", kb.admin_menu_settings),
+}
+
+
+@router.callback_query(F.data.regexp(r"^adm:m:(chan|vip|content|set)$"))
+async def admin_submenu(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    text, factory = _SUBMENUS[call.data.split(":")[2]]
+    await _show_menu(call, text, factory())
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:pay_list")
+async def pending_payments_list(call: CallbackQuery, db: Database, bot: Bot):
+    rows = await db.list_pending_payments(limit=10)
+    kb.set_pending_badge(await db.count_pending_payments())
+    if not rows:
+        await _show_menu(call, "✅ Kutilayotgan to'lov yo'q.", kb.admin_back_button("adm:panel"))
+        await call.answer()
+        return
+    await call.answer()
+    await call.message.answer(f"💳 Kutilayotgan to'lovlar: {len(rows)} ta (eng eskisidan boshlab). Har biri ostida ✅/❌ tugmalari bor:")
+    for r in rows:
+        amount = r["pay_amount"] or r["price"]
+        caption = (
+            f"💳 <b>To'lov #{r['id']}</b>\n"
+            f"👤 {html.escape(r['tg_name'] or '—')} (<code>{r['tg_id']}</code>)\n"
+            f"📦 {r['months']} oylik · 💰 kutilgan summa: <b>{fmt_number(amount)} so'm</b>\n"
+            f"{r['ai_note'] or '🤖 AI tekshiruvi o‘tkazilmagan'}"
+            + ("\n⚡ Vaqtinchalik VIP berilgan" if r["temp_until"] else "")
+        )
+        try:
+            await bot.send_photo(call.from_user.id, r["screenshot_file_id"], caption=caption,
+                                 reply_markup=kb.vip_payment_confirm_keyboard(r["id"]))
+        except Exception:
+            await call.message.answer(caption, reply_markup=kb.vip_payment_confirm_keyboard(r["id"]))
 
 
 # ------------------------------------------------------------------ #
@@ -172,9 +235,10 @@ async def add_anime_title(message: Message, state: FSMContext):
     title = message.text.strip()
     await state.update_data(new_title=title, anilist_id=None, al_country=None, al_year=None, al_extra=None)
     await state.set_state(AddAnimeStates.waiting_source)
+    sources = kb.fill_sources_text()
     await message.answer(
-        f"🔎 «{html.escape(title)}» haqidagi ma'lumotlarni (tavsif, poster, janr, yil, rejissyor, aktyorlar, treyler) TMDB'dan "
-        "avtomatik to'ldiraymi?",
+        f"🔎 «{html.escape(title)}» haqidagi ma'lumotlarni (tavsif, janr, yil, rejissyor, aktyorlar, yosh chegarasi) "
+        + (f"{sources} orqali avtomatik to'ldiraymi?" if sources else "qo'lda kiritasiz (TMDB/Gemini kaliti ulanmagan)."),
         reply_markup=kb.anilist_source_keyboard(),
     )
 
@@ -537,10 +601,14 @@ async def add_episode_filler_wrong_type(message: Message):
 
 @router.message(AddEpisodeStates.waiting_video)
 async def add_episode_wrong_type(message: Message):
-    await message.answer(
-        "📼 Iltimos video fayl yuboring (yoki pastdagi ✅ Tayyor / ❌ Bekor qilish tugmasidan foydalaning).",
-        reply_markup=kb.episode_upload_keyboard(),
-    )
+    if message.document:
+        text = (
+            "📄 Bu video <b>fayl (hujjat)</b> sifatida yuborilgan — Telegram o'lchamini bermaydi, sifatni aniqlab bo'lmaydi.\n"
+            "Iltimos, uni «siqmasdan, fayl sifatida» EMAS, oddiy <b>video</b> qilib qayta yuboring."
+        )
+    else:
+        text = "📼 Iltimos video fayl yuboring (yoki pastdagi ✅ Tayyor / ❌ Bekor qilish tugmasidan foydalaning)."
+    await message.answer(text, reply_markup=kb.episode_upload_keyboard())
 
 
 async def _return_after_episode_upload(
@@ -638,7 +706,12 @@ async def add_episode_done(call: CallbackQuery, state: FSMContext, db: Database,
         if anime_now and not anime_now["quality"]:
             # Kartadagi «📀 Sifat» qatori avtomatik to'ldiriladi (qo'lda kiritilgan bo'lsa tegilmaydi)
             await db.update_anime_field(anime_id, "quality", f"{episode_quality}p")
-        quality_txt = f"\n📀 Sifat avtomatik aniqlandi: {episode_quality}p"
+            quality_txt = f"\n📀 Sifat avtomatik aniqlandi: {episode_quality}p"
+        elif anime_now:
+            quality_txt = (
+                f"\n📀 Kartadagi sifat o'zgarmadi (qo'lda kiritilgan: {anime_now['quality']}). "
+                f"Video o'lchami bo'yicha: {episode_quality}p"
+            )
     await call.message.answer(
         f"✅ {len(videos)} ta qism saqlandi{filler_txt} "
         f"(oxirgi qo'shilgani: {last_episode['episode_number']}-qism).{quality_txt}"
@@ -942,11 +1015,14 @@ async def pay_approve(call: CallbackQuery, db: Database, bot: Bot):
         await call.answer("Bu to'lov allaqachon ko'rib chiqilgan.", show_alert=True)
         return
     user = await db.get_user_by_pk(payment["user_id"])
+    # AI bergan vaqtinchalik VIP'ni oldin olib tashlaymiz — to'liq muddat toza hisoblansin
+    await db.revoke_temp_vip(user["telegram_id"], payment["temp_until"])
     new_until = await db.grant_vip(
         user["telegram_id"], payment["months"], payment["price"], source="payment",
         approved_by=call.from_user.id,
     )
     await db.resolve_payment(payment_id, "approved", call.from_user.id)
+    kb.set_pending_badge(await db.count_pending_payments())
     await db.attribute_last_purchase(user["telegram_id"])  # qaysi kino VIP sotishga sabab bo'lgani statistikasi
     try:
         await call.message.edit_caption(caption=(call.message.caption or "") + "\n\n✅ TASDIQLANDI")
@@ -971,7 +1047,9 @@ async def pay_reject(call: CallbackQuery, db: Database, bot: Bot):
         await call.answer("Bu to'lov allaqachon ko'rib chiqilgan.", show_alert=True)
         return
     await db.resolve_payment(payment_id, "rejected", call.from_user.id)
+    kb.set_pending_badge(await db.count_pending_payments())
     user = await db.get_user_by_pk(payment["user_id"])
+    await db.revoke_temp_vip(user["telegram_id"], payment["temp_until"])  # faqat vaqtinchalik VIP; haqiqiyga tegmaydi
     try:
         await call.message.edit_caption(caption=(call.message.caption or "") + "\n\n❌ RAD ETILDI")
     except TelegramBadRequest:
@@ -1235,6 +1313,7 @@ async def add_channel_save(message: Message, state: FSMContext, db: Database, bo
             logger.warning("Kanal uchun invite link yaratib bo'lmadi (%s): %s", chat_id, e)
 
     await db.add_required_channel(chat_id, title, invite_link)
+    backup_service.request_backup("majburiy kanal ulandi")
     await state.clear()
 
     if is_numeric_id and not invite_link:
