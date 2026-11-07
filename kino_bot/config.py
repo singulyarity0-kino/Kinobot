@@ -167,6 +167,15 @@ DEFAULT_SETTINGS = {
     "vip_reminders_enabled": "1",    # VIP tugashiga 3 va 1 kun qolganda eslatma
     "preview_enabled": "1",          # VIP kino kartasida treyler ko'rsatiladi
     "movie_requests_enabled": "1",   # 📝 Kino so'rash
+    "translate_description": "1",    # TMDB tavsifini avtomatik o'zbekchaga tarjima qilish
+    "early_access_hours": "72",      # yangi kino oddiy foydalanuvchiga necha soatdan keyin ochiladi (0 = darhol)
+    "free_max_quality": "720",       # oddiy foydalanuvchi ko'ra oladigan eng yuqori sifat (0 = cheklov yo'q)
+    "manual_pay_enabled": "1",       # kartaga o'tkazib chek yuborish (qo'lda tasdiqlash) usuli
+    "stars_price_1": "0",            # Telegram Stars narxi (yulduz), 0 = shu tarif uchun Stars o'chiq
+    "stars_price_2": "0",
+    "stars_price_3": "0",
+    "ai_rewrite_description": "1",   # Gemini tavsifni o'zbekcha qiziqarli qilib yozadi (kalit bo'lsa)
+    "ai_channel_hook": "1",          # Gemini kanal posti uchun jozibali jumla yozadi (kalit bo'lsa)
     # Video zaxira kanali (admin paneldan ulanadi)
     "storage_channel_id": "",
     "storage_channel_title": "",

@@ -28,7 +28,15 @@ class IsAdminFilter(BaseFilter):
         return await db.is_admin(user.id)
 
 
-async def is_subscribed_to_all(bot: Bot, db: Database, telegram_id: int) -> list:
+_SUB_CACHE_TTL = 90.0
+_sub_ok_until: dict[int, float] = {}   # telegram_id -> monotonic vaqt (shu vaqtgacha "hammasiga obuna" deb olinadi)
+
+
+def invalidate_sub_cache(telegram_id: int) -> None:
+    _sub_ok_until.pop(telegram_id, None)
+
+
+async def is_subscribed_to_all(bot: Bot, db: Database, telegram_id: int, use_cache: bool = True) -> list:
     """
     Obuna bo'lmagan (yoki holatini ANIQLAB BO'LMAGAN) kanallar ro'yxatini qaytaradi
     (bo'sh ro'yxat = hammasiga obuna tasdiqlangan).
@@ -39,6 +47,8 @@ async def is_subscribed_to_all(bot: Bot, db: Database, telegram_id: int) -> list
     natijadagi qatorga "_bot_not_admin" belgisi qo'shiladi — shu orqali chaqiruvchi
     kod (build_subscribe_prompt) foydalanuvchiga aniq sabab ko'rsata oladi.
     """
+    if use_cache and _sub_ok_until.get(telegram_id, 0.0) > time.monotonic():
+        return []  # yaqinda tekshirilgan: har xabarda kanallarga so'rov yubormaymiz
     channels = await db.list_required_channels()
     missing = []
     for ch in channels:
@@ -54,6 +64,10 @@ async def is_subscribed_to_all(bot: Bot, db: Database, telegram_id: int) -> list
         except Exception:
             # Kutilmagan/noma'lum xato — avvalgidek, foydalanuvchini bloklamaymiz.
             continue
+    if not missing:
+        _sub_ok_until[telegram_id] = time.monotonic() + _SUB_CACHE_TTL
+    else:
+        _sub_ok_until.pop(telegram_id, None)
     return missing
 
 
@@ -91,13 +105,15 @@ def _shorten_html(text: str, limit: int) -> str:
     return cut.rstrip(" ,.;:") + "…"
 
 
-async def build_anime_card_text(db: Database, anime, locked: bool = False) -> str:
+async def build_anime_card_text(db: Database, anime, locked: bool = False, lock_note: str | None = None,
+                                reserve: int = 0) -> str:
     """
     Kino haqida avtomatik, bir xil ko'rinishdagi matn tayyorlaydi — admin buni
     qo'lda yozmaydi, database ma'lumotlaridan hosil bo'ladi. Shu funksiya HAM
     kino sahifasida (user.py), HAM kanalga e'lon qilishda (admin.py) bir xil
     ko'rinishni ta'minlash uchun qayta ishlatiladi.
-    locked=True — VIP bo'lmagan foydalanuvchiga ko'rsatilayotgan qulflangan karta.
+    locked=True — video qulflangan karta (VIP kino yoki erta kirish kechikishi); lock_note — sabab matni.
+    reserve — izohga keyin qo'shiladigan matn (hashtag, jumla) uchun band qilinadigan belgilar soni.
     """
     keys = anime.keys()
 
@@ -156,12 +172,12 @@ async def build_anime_card_text(db: Database, anime, locked: bool = False) -> st
     if anime["is_vip"]:
         tail.append("\n💎 VIP kino")
     if locked:
-        tail.append("🔒 Ko'rish uchun VIP kerak")
+        tail.append(lock_note or "🔒 Ko'rish uchun VIP kerak")
     base = "\n".join(lines + tail)
 
     desc = anime["description"] or ""
     if desc:
-        room = CAPTION_LIMIT - len(base) - 6
+        room = CAPTION_LIMIT - len(base) - 6 - reserve
         if room > 80:
             desc = _shorten_html(desc, room)
             lines += ["", f"📖 {desc}"]
@@ -207,8 +223,13 @@ class SubscriptionMiddleware(BaseMiddleware):
         if isinstance(event, Message):
             if event.text and event.text.startswith("/start"):
                 return await handler(event, data)
+            if event.successful_payment:
+                # Pul allaqachon yechilgan: VIP berilishi obuna holatiga bog'liq bo'lmasligi shart
+                return await handler(event, data)
         elif isinstance(event, CallbackQuery):
-            if event.data in self.SKIP_CALLBACKS or (event.data and event.data.startswith("vip_buy:")):
+            if event.data in self.SKIP_CALLBACKS or (
+                event.data and event.data.startswith(("vip_buy:", "pay:"))
+            ):
                 return await handler(event, data)
         else:
             return await handler(event, data)
@@ -300,11 +321,10 @@ async def build_announcement_markup(bot: Bot, anime):
 
 
 async def refresh_channel_post(bot: Bot, db: Database, anime_id: int) -> None:
-    """Kanaldagi e'lon matnini (reytingni) yangi holatga keltiradi. Xatolik bo'lsa bot to'xtamaydi."""
+    """Barcha kanallardagi e'lon matnini (reytingni) yangi holatga keltiradi. Xatolik bo'lsa bot to'xtamaydi."""
     try:
-        anime = await db.get_anime(anime_id)
-        if not anime or not anime["channel_message_id"]:
-            return  # bu anime e'loni kanalga yuborilmagan yoki xabar ID'si saqlanmagan (eski e'lon)
+        if not await db.list_announcements(anime_id):
+            return  # bu kino e'loni hech bir kanalga yuborilmagan
         last = _last_refresh.get(anime_id)
         if last is not None:
             wait = _REFRESH_COOLDOWN - (time.monotonic() - last)
@@ -319,25 +339,26 @@ async def refresh_channel_post(bot: Bot, db: Database, anime_id: int) -> None:
         _last_refresh[anime_id] = time.monotonic()
 
         anime = await db.get_anime(anime_id)  # kutish paytida o'zgargan bo'lishi mumkin
-        if not anime or not anime["channel_message_id"]:
+        if not anime:
             return
-        caption = await build_anime_card_text(db, anime)
-        markup = await build_announcement_markup(bot, anime)
-        try:
-            if anime["poster_file_id"]:
-                await bot.edit_message_caption(
-                    chat_id=config.MAIN_CHANNEL, message_id=anime["channel_message_id"],
-                    caption=caption, reply_markup=markup,
-                )
-            else:
-                await bot.edit_message_text(
-                    caption, chat_id=config.MAIN_CHANNEL, message_id=anime["channel_message_id"],
-                    reply_markup=markup,
-                )
-        except TelegramBadRequest as e:
-            if "not modified" in str(e).lower():
-                return
-            raise
+        # Kanal posti matni announce.build_post bilan bir xil (jumla + hashtag) bo'lishi uchun kech import
+        import announce
+        caption, markup = await announce.build_post(bot, db, anime)
+        for ann in await db.list_announcements(anime_id):
+            try:
+                if ann["has_photo"]:
+                    await bot.edit_message_caption(
+                        chat_id=ann["chat_id"], message_id=ann["message_id"], caption=caption, reply_markup=markup,
+                    )
+                else:
+                    await bot.edit_message_text(
+                        caption, chat_id=ann["chat_id"], message_id=ann["message_id"], reply_markup=markup,
+                    )
+            except TelegramBadRequest as e:
+                if "not modified" in str(e).lower():
+                    continue
+                _log.warning("Kanal e'loni yangilanmadi (%s): %s", ann["chat_id"], e)
+            await asyncio.sleep(0.3)
     except Exception:
         _log.exception("Kanal e'lonini yangilashda xatolik (anime_id=%s)", anime_id)
 

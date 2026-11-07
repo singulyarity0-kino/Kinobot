@@ -17,7 +17,9 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+import gemini
 import tmdb
+import translate
 import keyboards as kb
 from database import Database
 from handlers.common import IsAdminFilter
@@ -43,8 +45,8 @@ async def _run_search(message: Message, state: FSMContext, query: str) -> None:
     except Exception as e:
         logger.warning("TMDB qidiruvi xato: %s", e)
         await wait.edit_text(
-            "❌ TMDB bilan bog'lanib bo'lmadi (kalit sozlanmagan, internet yoki sayt ishlamayapti). "
-            "Qo'lda kiritishingiz yoki keyinroq urinib ko'rishingiz mumkin.",
+            f"❌ TMDB xatosi: <code>{html.escape(str(e) or type(e).__name__)}</code>\n\n"
+            "Qo'lda kiritishingiz yoki sozlamani to'g'rilab qayta urinib ko'rishingiz mumkin.",
             reply_markup=kb.anilist_retry_keyboard(),
         )
         await state.set_state(AddAnimeStates.waiting_source)
@@ -133,6 +135,17 @@ async def al_pick(call: CallbackQuery, state: FSMContext, db: Database, bot: Bot
     description = item["description"] or details.get("description") or ""
     country = details.get("country") or item["country"]
 
+    # Tavsif: avval Gemini (o'zbekcha qiziqarli matn, bitta so'rovda), bo'lmasa tarjima zanjiri
+    translated_ok = rewritten = False
+    if description and await db.get_setting("ai_rewrite_description", "1") == "1" and gemini.is_configured():
+        out = await gemini.rewrite_description(item["title"], item["year"], html.unescape(description), genre_names)
+        if out:
+            description, rewritten = html.escape(out, quote=False), True
+    if description and not rewritten and await db.get_setting("translate_description", "1") == "1":
+        uz = await translate.to_uzbek_escaped(description)
+        if uz:
+            description, translated_ok = uz, True
+
     extra = {
         "kind": item["kind"],
         "tmdb_id": item["id"],
@@ -155,7 +168,15 @@ async def al_pick(call: CallbackQuery, state: FSMContext, db: Database, bot: Bot
 
     names = {g["id"]: g["name"] for g in genres}
     lines = [f"✅ «{html.escape(item['title'])}» ma'lumotlari TMDB'dan olindi ({item['format']}):"]
-    lines.append(f"📖 Tavsif: {len(description)} belgi" if description else "📖 Tavsif: topilmadi")
+    if description:
+        if rewritten:
+            lines.append("📖 Tavsif: Gemini o'zbekcha qilib yozdi 🤖")
+        elif translated_ok:
+            lines.append("📖 Tavsif: o'zbekchaga tarjima qilindi")
+        else:
+            lines.append(f"📖 Tavsif: {len(description)} belgi (tarjimasiz)")
+    else:
+        lines.append("📖 Tavsif: topilmadi")
     lines.append("🖼 Poster: " + ("olindi" if poster else "olib bo'lmadi (keyin «🖼 Poster» orqali qo'shing)"))
     lines.append("📅 Yil: " + (item["year"] or "—") + " · 🌍 Davlat: " + (country or "tanlanadi"))
     if extra.get("duration"):
@@ -172,8 +193,8 @@ async def al_pick(call: CallbackQuery, state: FSMContext, db: Database, bot: Bot
         lines.append("🎭 Janr: " + ", ".join(names[i] for i in genre_ids))
     lines.append("")
     lines.append(
-        "ℹ️ Tavsif ruscha/inglizcha bo'lishi mumkin — kerak bo'lsa, kino saqlangandan keyin "
-        "«✏️ Tavsifni tahrirlash» orqali o'zbekchaga o'zgartiring."
+        "ℹ️ Avto-tarjima aniq bo'lmasligi mumkin — kerak bo'lsa, kino saqlangandan keyin "
+        "«✏️ Tavsifni tahrirlash» orqali to'g'rilang."
     )
     await bot.send_message(chat_id, "\n".join(lines))
 

@@ -26,8 +26,8 @@ def main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="🎞 To'plamlar"), KeyboardButton(text="🎟 Premyeralar")],
         [KeyboardButton(text="❤️ Sevimlilar"), KeyboardButton(text="🎭 Janrlar")],
         [KeyboardButton(text="🕐 Ko'rish tarixi"), KeyboardButton(text="🎁 Do'st taklif qilish")],
-        [KeyboardButton(text="📝 Kino so'rash"), KeyboardButton(text="👤 Profil")],
-        [KeyboardButton(text="🆘 Yordam")],
+        [KeyboardButton(text="🔔 Janrga obuna"), KeyboardButton(text="📝 Kino so'rash")],
+        [KeyboardButton(text="👤 Profil"), KeyboardButton(text="🆘 Yordam")],
     ]
     if is_admin:
         rows.append([KeyboardButton(text="⚙️ Admin panel")])
@@ -146,6 +146,7 @@ def anime_detail_keyboard(
     has_versions: bool = False,
     trailer_url: str | None = None,
     show_follow: bool = True,
+    share_url: str | None = None,
 ) -> InlineKeyboardMarkup:
     """
     Kino sahifasi tugmalari.
@@ -186,6 +187,9 @@ def anime_detail_keyboard(
         follow_text = "🔕 Kuzatishni to'xtatish" if is_following else "🔔 Yangi qismlarni kuzatish"
         b.button(text=follow_text, callback_data=f"follow:{anime_id}")
         rows.append(1)
+    if share_url:
+        b.row(InlineKeyboardButton(text="📤 Ulashish", url=share_url))
+        rows.append(1)
     if not locked:
         b.button(text="⚠️ Muammo haqida xabar", callback_data=f"report:{anime_id}")
         rows.append(1)
@@ -193,11 +197,47 @@ def anime_detail_keyboard(
     return b.as_markup()
 
 
-def versions_keyboard(anime_id: int, versions) -> InlineKeyboardMarkup:
+def versions_keyboard(anime_id: int, versions, locked_ids: set[int] | None = None) -> InlineKeyboardMarkup:
+    """Variant tugmalari. locked_ids — foydalanuvchi uchun yopiq (VIP sifat) variantlar: 🔒 belgisi bilan."""
+    locked_ids = locked_ids or set()
     b = InlineKeyboardBuilder()
     for v in versions:
-        b.button(text=v["label"], callback_data=f"ver:watch:{v['id']}")
+        mark = "🔒 " if v["id"] in locked_ids else "▶️ "
+        b.button(text=f"{mark}{v['label']}", callback_data=f"ver:watch:{v['id']}")
     b.button(text="⬅️ Kino sahifasiga", callback_data=f"anime:{anime_id}")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def genre_sub_keyboard(genres, selected: set[int]) -> InlineKeyboardMarkup:
+    """🔔 Janrga obuna: belgilanganlar ✅ bilan, bosilsa almashadi."""
+    b = InlineKeyboardBuilder()
+    for g in genres:
+        mark = "✅ " if g["id"] in selected else ""
+        b.button(text=f"{mark}{g['emoji']} {g['name']}", callback_data=f"gsub:{g['id']}")
+    b.adjust(2)
+    return b.as_markup()
+
+
+def report_variant_keyboard(anime_id: int, versions) -> InlineKeyboardMarkup:
+    """Muammo xabari: qaysi variantda (sifat/til) muammo borligini tanlash."""
+    b = InlineKeyboardBuilder()
+    for v in versions:
+        b.button(text=v["label"], callback_data=f"repv:{anime_id}:{v['id']}")
+    b.button(text="Umumiy muammo", callback_data=f"repv:{anime_id}:0")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def pay_methods_keyboard(months: int, card_price: str | None, stars: int, manual: bool) -> InlineKeyboardMarkup:
+    """To'lov usuli tanlash: avtomatik karta / Telegram Stars / kartaga o'tkazib chek yuborish."""
+    b = InlineKeyboardBuilder()
+    if card_price:
+        b.button(text=f"💳 Karta bilan — {card_price} so'm (avtomatik)", callback_data=f"pay:card:{months}")
+    if stars:
+        b.button(text=f"⭐ Telegram Stars — {stars} ⭐", callback_data=f"pay:stars:{months}")
+    if manual:
+        b.button(text="🧾 Kartaga o'tkazib, chek yuborish", callback_data=f"pay:manual:{months}")
     b.adjust(1)
     return b.as_markup()
 
@@ -410,7 +450,8 @@ def admin_panel_menu() -> InlineKeyboardMarkup:
     b.button(text="🎞 To'plamlar", callback_data="adm:cols")
     b.button(text="📝 So'rovlar", callback_data="adm:requests")
     b.button(text="⚠️ Muammolar", callback_data="adm:reports")
-    b.button(text="🕐 Kunlik e'lon", callback_data="adm:daily")
+    b.button(text="📣 E'lon kanallari", callback_data="adm:annch")
+    b.button(text="📈 Kino statistikasi", callback_data="adm:kstats")
     b.button(text="🎁 Referal", callback_data="adm:ref")
     b.button(text="🖼 /start rasm/matn", callback_data="adm:start_settings")
     b.button(text="🆘 Yordam matni", callback_data="adm:help_settings")
@@ -527,10 +568,11 @@ def admin_anime_detail_keyboard(anime_id: int, has_seasons: bool = False) -> Inl
     b.button(text="🎬 Rejissyor/aktyor/davomiylik...", callback_data=f"adm:kx:{anime_id}")
     b.button(text="🎙 Til/sifat variantlari", callback_data=f"adm:ver:{anime_id}")
     b.button(text="🎞 To'plamlarga qo'shish", callback_data=f"adm:colpick:{anime_id}")
-    b.button(text="📢 Kanalga e'lon qilish", callback_data=f"adm:announce:{anime_id}")
+    b.button(text="📢 Hozir e'lon qilish (barcha kanallarga)", callback_data=f"adm:announce:{anime_id}")
+    b.button(text="🕐 Kanalga rejalashtirish", callback_data=f"adm:sched:{anime_id}")
     b.button(text="🗑 O'chirish", callback_data=f"adm:delete_anime_confirm:{anime_id}")
     b.button(text="⬅️ Orqaga", callback_data="adm:anime_list:0")
-    b.adjust(1, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1)
+    b.adjust(1, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1)
     return b.as_markup()
 
 

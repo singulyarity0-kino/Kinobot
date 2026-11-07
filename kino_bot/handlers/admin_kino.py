@@ -18,8 +18,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+import config
+import gemini
 import keyboards as kb
+import payments
 from database import Database
+from kino_db import detect_quality
 from funnel import int_setting
 from handlers.common import IsAdminFilter, build_admin_anime_text
 from states import KinoAdminStates
@@ -41,12 +45,30 @@ FUNNEL_NUMBERS = {
     "free_daily_limit": ("🎟 Kunlik bepul limit", "Oddiy foydalanuvchi kuniga nechta kino ocha oladi? (0 = cheklovsiz)", 0, 50),
     "trial_days": ("🎁 Sinov muddati (kun)", "Yangi foydalanuvchiga necha kunlik bepul VIP berilsin?", 1, 30),
     "renewal_discount": ("🎉 Qayta xarid chegirmasi (%)", "VIP'ni qayta olganlarga necha foiz chegirma? (0 = yo'q)", 0, 90),
+    "early_access_hours": (
+        "⏳ Erta kirish (soat)",
+        "Yangi kino oddiy foydalanuvchiga necha soatdan keyin ochiladi? VIP'ga darhol ochiq. (0 = hammaga darhol)",
+        0, 720,
+    ),
+    "stars_price_1": ("⭐ Stars narxi: 1 oy", "1 oylik VIP necha Telegram Stars (⭐) turadi? (0 = Stars o'chiq)", 0, 100000),
+    "stars_price_2": ("⭐ Stars narxi: 2 oy", "2 oylik VIP necha Stars? (0 = o'chiq)", 0, 100000),
+    "stars_price_3": ("⭐ Stars narxi: 3 oy", "3 oylik VIP necha Stars? (0 = o'chiq)", 0, 100000),
+    "free_max_quality": (
+        "📀 Oddiylar uchun eng yuqori sifat",
+        "Oddiy foydalanuvchi ko'ra oladigan eng yuqori sifatni yozing: <code>480</code>, <code>720</code>, "
+        "<code>1080</code> (yoki <code>0</code> — cheklovsiz). Undan yuqori sifat faqat VIP uchun.",
+        0, 2160,
+    ),
 }
 FUNNEL_TOGGLES = {
     "trial_enabled": "🎁 Bepul sinov",
     "vip_reminders_enabled": "⏳ Tugash eslatmalari",
     "preview_enabled": "🎬 Qulflangan kartada treyler",
     "movie_requests_enabled": "📝 Kino so'rash",
+    "manual_pay_enabled": "🧾 Kartaga o'tkazib chek yuborish usuli",
+    "translate_description": "🌐 Tavsifni o'zbekchaga tarjima qilish",
+    "ai_rewrite_description": "🤖 Tavsifni Gemini bilan qiziqarli yozish",
+    "ai_channel_hook": "🤖 Kanal postiga Gemini jumlasi",
 }
 
 
@@ -58,6 +80,14 @@ async def _funnel_view(db: Database):
         f"🎟 Kunlik bepul limit: <b>{lim if lim else 'cheklovsiz'}</b>",
         f"🎁 Sinov: <b>{await int_setting(db, 'trial_days', 1)} kun</b>",
         f"🎉 Qayta xarid chegirmasi: <b>{await int_setting(db, 'renewal_discount', 0)}%</b>",
+        f"⏳ Erta kirish: <b>{await int_setting(db, 'early_access_hours', 0) or 'yo‘q'}"
+        f"{' soat' if await int_setting(db, 'early_access_hours', 0) else ''}</b>",
+        f"📀 Oddiylar uchun sifat: <b>{await int_setting(db, 'free_max_quality', 0) or 'cheklovsiz'}"
+        f"{'p gacha' if await int_setting(db, 'free_max_quality', 0) else ''}</b>",
+        f"💳 Avtomatik karta to'lovi: <b>{'ulangan' if payments.card_enabled() else 'ulanmagan (PAYMENT_PROVIDER_TOKEN)'}</b>",
+        f"⭐ Stars narxlari (1/2/3 oy): <b>{await int_setting(db, 'stars_price_1', 0)} / "
+        f"{await int_setting(db, 'stars_price_2', 0)} / {await int_setting(db, 'stars_price_3', 0)}</b>",
+        f"🤖 Gemini: <b>{'ulangan' if gemini.is_configured() else 'kalit yo‘q (GEMINI_API_KEY)'}</b>",
         "",
         "Pastdagi tugmalar bilan o'zgartiring:",
     ]
@@ -116,6 +146,9 @@ async def funnel_set_value(message: Message, db: Database, state: FSMContext):
     raw = message.text.strip()
     if not raw.isdigit() or not (lo <= int(raw) <= hi):
         await message.answer(f"❗ {lo} dan {hi} gacha butun son kiriting.")
+        return
+    if key == "free_max_quality" and int(raw) not in (0, 360, 480, 720, 1080, 2160):
+        await message.answer("❗ Faqat: 0, 360, 480, 720, 1080 yoki 2160.")
         return
     await db.set_setting(key, raw)
     await state.clear()
@@ -325,8 +358,11 @@ async def kx_menu(call: CallbackQuery, db: Database):
         b.button(text=f"{filled}{label}", callback_data=f"adm:kxe:{anime_id}:{field}")
     kind_now = "serial" if anime["kind"] == "series" else "kino"
     b.button(text=f"📺 Turi: {kind_now} (almashtirish)", callback_data=f"adm:kxk:{anime_id}")
+    open_now = "✅ hammaga darhol ochiq" if anime["open_to_all"] else "⬜️ kechikish qo'llanadi"
+    b.button(text=f"⏳ Erta kirish: {open_now}", callback_data=f"adm:kxo:{anime_id}")
+    b.button(text="🤖 Janrni Gemini bilan taklif qilish", callback_data=f"adm:aig:{anime_id}")
     b.button(text="⬅️ Kino sahifasiga", callback_data=f"adm:anime:{anime_id}")
-    b.adjust(2, 2, 2, 1, 1, 1)
+    b.adjust(2, 2, 2, 1, 1, 1, 1, 1)
     await call.message.answer("🎬 Qaysi ma'lumotni o'zgartiramiz?", reply_markup=b.as_markup())
     await call.answer()
 
@@ -341,6 +377,54 @@ async def kx_kind(call: CallbackQuery, db: Database):
     new_kind = "movie" if anime["kind"] == "series" else "series"
     await db.update_anime_field(anime_id, "kind", new_kind)
     await call.answer("Turi: " + ("serial" if new_kind == "series" else "kino"), show_alert=True)
+
+
+@router.callback_query(F.data.startswith("adm:kxo:"))
+async def kx_open_to_all(call: CallbackQuery, db: Database):
+    anime_id = int(call.data.split(":")[2])
+    on = await db.toggle_open_to_all(anime_id)
+    await call.answer(
+        "✅ Bu kino hammaga darhol ochiq (kechikishsiz)." if on else "⏳ Kechikish qo'llanadi.", show_alert=True
+    )
+
+
+@router.callback_query(F.data.startswith("adm:aig:"))
+async def kx_ai_genres(call: CallbackQuery, db: Database, state: FSMContext):
+    anime_id = int(call.data.split(":")[2])
+    anime = await db.get_anime(anime_id)
+    if not anime:
+        await call.answer("Kino topilmadi.", show_alert=True)
+        return
+    if not gemini.is_configured():
+        await call.answer("Gemini kaliti yo'q (Render: GEMINI_API_KEY).", show_alert=True)
+        return
+    await call.answer("Gemini o'ylayapti...")
+    genres = await db.list_genres()
+    names = [g["name"] for g in genres if not g["is_vip"]]
+    picked = await gemini.suggest_genres(anime["title"], html.unescape(anime["description"] or ""), names)
+    if not picked:
+        await call.message.answer("😕 Gemini janr taklif qila olmadi (limit tugagan yoki tavsif yo'q).")
+        return
+    by_name = {g["name"]: g["id"] for g in genres}
+    ids = [by_name[n] for n in picked if n in by_name]
+    await state.update_data(ai_genre_ids=ids, ai_genre_anime=anime_id)
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Qo'llash", callback_data=f"adm:aig_ok:{anime_id}")
+    b.button(text="❌ Bekor", callback_data=f"adm:kx:{anime_id}")
+    b.adjust(2)
+    await call.message.answer("🤖 Taklif: " + ", ".join(picked), reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data.startswith("adm:aig_ok:"))
+async def kx_ai_genres_apply(call: CallbackQuery, db: Database, state: FSMContext):
+    anime_id = int(call.data.split(":")[2])
+    data = await state.get_data()
+    if data.get("ai_genre_anime") != anime_id or not data.get("ai_genre_ids"):
+        await call.answer("Taklif eskirgan, qaytadan so'rang.", show_alert=True)
+        return
+    await db.update_anime_genres(anime_id, data["ai_genre_ids"])
+    await state.update_data(ai_genre_ids=None, ai_genre_anime=None)
+    await call.answer("✅ Janrlar yangilandi", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("adm:kxe:"))
@@ -426,23 +510,46 @@ async def ver_delete(call: CallbackQuery, db: Database):
     await call.answer("🗑 O'chirildi")
 
 
+def _quality_keyboard():
+    b = InlineKeyboardBuilder()
+    for q in (360, 480, 720, 1080, 2160):
+        b.button(text=f"{q}p", callback_data=f"adm:vq:{q}")
+    b.adjust(3, 2)
+    return b.as_markup()
+
+
+def _lang_keyboard():
+    b = InlineKeyboardBuilder()
+    for i, (emoji, name) in enumerate(config.AUDIO_LANG_OPTIONS):
+        b.button(text=f"{emoji} {name}", callback_data=f"adm:vl:{i}")
+    b.button(text="Tilsiz (faqat sifat)", callback_data="adm:vl:-1")
+    b.adjust(2)
+    return b.as_markup()
+
+
 @router.callback_query(F.data.startswith("adm:ver_add:"))
 async def ver_add_start(call: CallbackQuery, state: FSMContext):
     anime_id = int(call.data.split(":")[2])
     await state.set_state(KinoAdminStates.waiting_version_video)
     await state.update_data(ver_anime_id=anime_id)
-    await call.message.answer("📹 Variant videosini yuboring:", reply_markup=kb.cancel_menu())
+    await call.message.answer(
+        "📹 Variant videosini yuboring. Sifatni (480p/720p/1080p) bot video o'lchamidan o'zi aniqlaydi.",
+        reply_markup=kb.cancel_menu(),
+    )
     await call.answer()
 
 
 @router.message(KinoAdminStates.waiting_version_video, F.video | F.document)
 async def ver_add_video(message: Message, state: FSMContext):
-    file_id = message.video.file_id if message.video else message.document.file_id
-    await state.update_data(ver_file_id=file_id)
-    await state.set_state(KinoAdminStates.waiting_version_label)
-    await message.answer(
-        "✏️ Variant nomini yozing — tugmada shunday ko'rinadi.\nMasalan: <code>🇺🇿 O'zbekcha · 1080p</code>"
-    )
+    if message.video:
+        quality = detect_quality(message.video.width, message.video.height)
+        await state.update_data(ver_file_id=message.video.file_id, ver_quality=quality)
+        await message.answer(f"📀 Sifat aniqlandi: <b>{quality}p</b>\n\n🎙 Bu variantning tilini tanlang:", reply_markup=_lang_keyboard())
+    else:
+        await state.update_data(ver_file_id=message.document.file_id, ver_quality=None)
+        await message.answer(
+            "📄 Fayl hujjat sifatida yuborilgan, o'lchamini bilmayman. Sifatini tanlang:", reply_markup=_quality_keyboard()
+        )
 
 
 @router.message(KinoAdminStates.waiting_version_video)
@@ -450,15 +557,65 @@ async def ver_add_video_wrong(message: Message):
     await message.answer("📹 Iltimos, video fayl yuboring.")
 
 
-@router.message(KinoAdminStates.waiting_version_label, F.text)
-async def ver_add_label(message: Message, db: Database, state: FSMContext):
+@router.callback_query(F.data.regexp(r"^adm:vq:\d+$"))
+async def ver_pick_quality(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    label = message.text.strip()[:60]
-    if not label:
-        await message.answer("❗ Nom bo'sh bo'lmasin.")
+    if not data.get("ver_file_id"):
+        await call.answer("Avval video yuboring.", show_alert=True)
         return
-    await db.add_version(data["ver_anime_id"], label, data["ver_file_id"])
+    quality = int(call.data.split(":")[2])
+    await state.update_data(ver_quality=quality)
+    await call.message.answer(f"📀 Sifat: <b>{quality}p</b>\n\n🎙 Bu variantning tilini tanlang:", reply_markup=_lang_keyboard())
+    await call.answer()
+
+
+@router.callback_query(F.data.regexp(r"^adm:vl:-?\d+$"))
+async def ver_pick_lang(call: CallbackQuery, db: Database, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("ver_file_id") or not data.get("ver_quality"):
+        await call.answer("Avval video yuboring.", show_alert=True)
+        return
+    idx = int(call.data.split(":")[2])
+    quality = data["ver_quality"]
+    if idx >= 0:
+        emoji, name = config.AUDIO_LANG_OPTIONS[idx]
+        label = f"{emoji} {name} · {quality}p"
+    else:
+        label = f"🎞 {quality}p"
+    await db.add_version(data["ver_anime_id"], label, data["ver_file_id"], quality)
     await state.clear()
-    await message.answer("✅ Variant qo'shildi.", reply_markup=kb.main_menu(is_admin=True))
+    await call.message.answer(f"✅ Variant qo'shildi: {label}", reply_markup=kb.main_menu(is_admin=True))
     text, markup = await _versions_view(db, data["ver_anime_id"])
-    await message.answer(text, reply_markup=markup)
+    await call.message.answer(text, reply_markup=markup)
+    await call.answer()
+
+
+# ================================================================== #
+# 📈 Kino statistikasi
+# ================================================================== #
+@router.callback_query(F.data == "adm:kstats")
+async def kino_stats(call: CallbackQuery, db: Database):
+    lines = ["📈 <b>Kino statistikasi</b> (oxirgi 30 kun)", ""]
+    top = await db.top_viewed(limit=10, days=30)
+    lines.append("🔥 <b>Eng ko'p ko'rilgan:</b>")
+    lines += [f"{i}. {html.escape(a['title'])} — {a['view_count']}" for i, a in enumerate(top, 1)] or ["ma'lumot yo'q"]
+
+    quality = await db.quality_stats(30)
+    lines += ["", "📀 <b>Qaysi sifat tanlangan:</b>"]
+    if quality:
+        total = sum(n for _, n in quality)
+        lines += [f"• {q}p — {n} marta ({round(n * 100 / total)}%)" for q, n in quality]
+    else:
+        lines.append("ma'lumot yo'q (variantli kinolar ko'rilgach paydo bo'ladi)")
+
+    trig = await db.vip_trigger_stats(10)
+    lines += ["", "💎 <b>VIP olib kelgan kinolar</b> (to'lovdan oldin ko'rgan oxirgi qulflangan kino):"]
+    if trig:
+        lines += [
+            f"{i}. {html.escape(r['title'])} — {r['sales']} ta xarid, {r['total']:,} so'm".replace(",", " ")
+            for i, r in enumerate(trig, 1)
+        ]
+    else:
+        lines.append("ma'lumot yo'q")
+    await call.message.answer("\n".join(lines), reply_markup=kb.admin_back_button("adm:panel"))
+    await call.answer()

@@ -87,15 +87,49 @@ async def vip_offer(db: Database, telegram_id: int, header: str) -> tuple[str, I
 # ------------------------------------------------------------------ #
 # Kirish huquqi (kunlik limit / VIP)
 # ------------------------------------------------------------------ #
+async def early_unlock(db: Database, anime) -> Optional[datetime.datetime]:
+    """Oddiy foydalanuvchiga qachon ochilishi (UTC); kechikish yo'q yoki o'tgan bo'lsa None."""
+    hours = await int_setting(db, "early_access_hours", 0)
+    return db.early_unlock_at(anime, hours)
+
+
+def fmt_remaining(unlock_utc: datetime.datetime) -> str:
+    left = max(0, int((unlock_utc - datetime.datetime.utcnow()).total_seconds()))
+    days, rem = divmod(left, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days} kun {hours} soat"
+    if hours:
+        return f"{hours} soat {minutes} daqiqa"
+    return f"{max(minutes, 1)} daqiqa"
+
+
+async def lock_info(db: Database, telegram_id: int, anime) -> tuple[str, str]:
+    """(sabab, karta izohi): sabab '' | 'vip' | 'early'. VIP foydalanuvchida har doim ('', '')."""
+    if await has_vip_access(db, telegram_id):
+        return "", ""
+    if anime["is_vip"]:
+        return "vip", "🔒 Ko'rish uchun VIP kerak"
+    unlock = await early_unlock(db, anime)
+    if unlock:
+        return "early", (
+            f"⏳ Yangi kino! Hamma uchun {fmt_remaining(unlock)} dan keyin ochiladi.\n"
+            "💎 VIP bilan hoziroq ko'ring."
+        )
+    return "", ""
+
+
 async def check_access(db: Database, telegram_id: int, anime) -> tuple[bool, str]:
     """
-    (ruxsat, sabab). sabab: '' | 'vip' (VIP kino) | 'limit' (kunlik bepul limit tugagan).
+    (ruxsat, sabab). sabab: '' | 'vip' (VIP kino) | 'early' (yangi kino, kechikish) | 'limit' (kunlik limit).
     Bir kinoni bugun qayta ko'rish limitga qo'shilmaydi.
     """
+    reason, _note = await lock_info(db, telegram_id, anime)
+    if reason:
+        return False, reason
     if await has_vip_access(db, telegram_id):
         return True, ""
-    if anime["is_vip"]:
-        return False, "vip"
     limit = await int_setting(db, "free_daily_limit", 0)
     if limit <= 0:
         return True, ""
@@ -104,6 +138,17 @@ async def check_access(db: Database, telegram_id: int, anime) -> tuple[bool, str
     if await db.count_free_views_today(telegram_id) >= limit:
         return False, "limit"
     return True, ""
+
+
+async def quality_locked(db: Database, telegram_id: int, version) -> bool:
+    """Oddiy foydalanuvchi uchun bu sifat yopiqmi (sozlama: free_max_quality, 0 = cheklov yo'q)."""
+    q = version["quality"] if "quality" in version.keys() else None
+    if not q:
+        return False
+    max_free = await int_setting(db, "free_max_quality", 0)
+    if max_free <= 0 or q <= max_free:
+        return False
+    return not await has_vip_access(db, telegram_id)
 
 
 async def free_quota_line(db: Database, telegram_id: int) -> str:
@@ -117,18 +162,55 @@ async def free_quota_line(db: Database, telegram_id: int) -> str:
     return f"🎟 Bugungi bepul limit: {used}/{limit}"
 
 
-async def send_vip_offer(bot: Bot, db: Database, chat_id: int, telegram_id: int, reason: str, title: str = "") -> None:
+async def send_vip_offer(bot: Bot, db: Database, chat_id: int, telegram_id: int, reason: str, title: str = "",
+                         anime_id: Optional[int] = None, quality: Optional[int] = None) -> None:
     limit = await int_setting(db, "free_daily_limit", 0)
+    name = f"«{title}» — " if title else ""
     if reason == "limit":
         header = (
             f"⏳ <b>Bugungi bepul limit tugadi</b> ({limit}/{limit}).\n"
             "Ertaga yangi limit beriladi, yoki 💎 VIP bilan hoziroq cheksiz tomosha qiling:"
         )
+    elif reason == "early":
+        header = f"⏳ <b>{name}yangi kino</b>\nBu kino hamma uchun hali ochilmagan. 💎 VIP bilan hoziroq ko'rishingiz mumkin:"
+        if anime_id:
+            anime = await db.get_anime(anime_id)
+            unlock = await early_unlock(db, anime) if anime else None
+            if unlock:
+                header = (
+                    f"⏳ <b>{name}yangi kino</b>\n"
+                    f"Hamma uchun <b>{fmt_remaining(unlock)}</b> dan keyin ochiladi "
+                    f"({local_str(unlock)}).\n💎 VIP bilan hoziroq ko'rishingiz mumkin:"
+                )
+    elif reason == "quality":
+        header = (
+            f"💎 <b>{quality}p sifat — VIP uchun</b>\n"
+            "Oddiy foydalanuvchilar pastroq sifatda ko'ra oladi. VIP bilan eng yuqori sifat ochiladi:"
+        )
     else:
-        name = f"«{title}» — " if title else ""
         header = f"💎 <b>{name}VIP kino</b>\nKo'rish uchun VIP obuna kerak:"
+    if anime_id:
+        await db.set_vip_trigger(telegram_id, anime_id, reason)
     text, markup = await vip_offer(db, telegram_id, header)
     await bot.send_message(chat_id, text, reply_markup=markup)
+
+
+_bot_username: Optional[str] = None
+
+
+async def get_bot_username(bot: Bot) -> str:
+    """Bot username'i (ulashish havolasi uchun); bir marta so'raladi va eslab qolinadi."""
+    global _bot_username
+    if not _bot_username:
+        _bot_username = (await bot.get_me()).username or ""
+    return _bot_username
+
+
+async def share_url(bot: Bot, anime) -> str:
+    """Telegramning ulashish oynasini ochadigan havola: do'st bossa shu kinoga to'g'ri kiradi."""
+    from urllib.parse import quote
+    link = f"https://t.me/{await get_bot_username(bot)}?start=anime_{anime['anime_code']}"
+    return f"https://t.me/share/url?url={quote(link, safe='')}&text={quote('🎬 ' + anime['title'], safe='')}"
 
 
 # ------------------------------------------------------------------ #

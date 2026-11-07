@@ -93,3 +93,11 @@ class KinoAdminStates(StatesGroup):
     waiting_version_label = State()    # variant nomi (masalan: 🇺🇿 O'zbekcha · 1080p)
     waiting_collection_name = State()  # yangi to'plam nomi
     waiting_setting_value = State()    # voronka sozlamasi (son)
+
+
+class AnnounceStates(StatesGroup):
+    """Admin: e'lon kanallari va rejalashtirilgan postlar."""
+    waiting_chat = State()        # yangi kanal (@username, -100... yoki kanaldan forward)
+    waiting_time = State()        # kanalning kunlik e'lon vaqti (HH:MM)
+    waiting_sched_time = State()  # rejalashtirilgan post vaqti
+    waiting_quality = State()     # variant sifati (hujjat sifatida yuborilgan video uchun)

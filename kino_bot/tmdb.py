@@ -24,13 +24,22 @@ logger = logging.getLogger("kino_bot.tmdb")
 API = "https://api.themoviedb.org/3"
 IMG = "https://image.tmdb.org/t/p/w780"
 
-API_KEY = os.getenv("TMDB_API_KEY", "").strip()
-READ_TOKEN = os.getenv("TMDB_READ_TOKEN", "").strip()
-LANGUAGE = os.getenv("TMDB_LANGUAGE", "ru-RU").strip() or "ru-RU"
+
+
+def _key() -> str:
+    return os.getenv("TMDB_API_KEY", "").strip()
+
+
+def _token() -> str:
+    return os.getenv("TMDB_READ_TOKEN", "").strip()
+
+
+def _language() -> str:
+    return os.getenv("TMDB_LANGUAGE", "ru-RU").strip() or "ru-RU"
 
 
 def is_configured() -> bool:
-    return bool(API_KEY or READ_TOKEN)
+    return bool(_key() or _token())
 
 
 # TMDB janr ID -> botdagi janr nomlari (config.NORMAL_GENRES dagi nomlar bilan bir xil bo'lishi kerak)
@@ -60,8 +69,8 @@ CERT_TO_AGE: dict[str, str] = {
 
 def _headers() -> dict[str, str]:
     h = {"Accept": "application/json"}
-    if READ_TOKEN:
-        h["Authorization"] = f"Bearer {READ_TOKEN}"
+    if _token():
+        h["Authorization"] = f"Bearer {_token()}"
     return h
 
 
@@ -69,8 +78,8 @@ async def _get(path: str, params: Optional[dict[str, Any]] = None, timeout: floa
     if not is_configured():
         raise RuntimeError("TMDB kaliti sozlanmagan (.env: TMDB_API_KEY yoki TMDB_READ_TOKEN)")
     q = dict(params or {})
-    if API_KEY and not READ_TOKEN:
-        q["api_key"] = API_KEY
+    if _key() and not _token():
+        q["api_key"] = _key()
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     async with aiohttp.ClientSession(timeout=client_timeout) as session:
         async with session.get(f"{API}{path}", params=q, headers=_headers()) as resp:
@@ -164,11 +173,11 @@ def normalize(m: dict[str, Any]) -> Optional[dict[str, Any]]:
 
 
 async def search(query: str, limit: int = 5) -> list[dict[str, Any]]:
-    data = await _get("/search/multi", {"query": query, "language": LANGUAGE, "include_adult": "false"})
+    data = await _get("/search/multi", {"query": query, "language": _language(), "include_adult": "false"})
     items = [normalize(m) for m in (data.get("results") or [])]
     items = [i for i in items if i]
     # Tavsifi bo'sh bo'lsa (ruscha tarjima yo'q) — inglizcha bilan to'ldiramiz
-    if any(not i["description"] for i in items[:limit]) and LANGUAGE != "en-US":
+    if any(not i["description"] for i in items[:limit]) and _language() != "en-US":
         try:
             en = await _get("/search/multi", {"query": query, "language": "en-US", "include_adult": "false"})
             en_by_id = {(m.get("media_type"), m.get("id")): m for m in (en.get("results") or [])}
@@ -192,7 +201,7 @@ async def get_details(item: dict[str, Any]) -> dict[str, Any]:
         data = await _get(
             path,
             {
-                "language": LANGUAGE,
+                "language": _language(),
                 "append_to_response": "credits,videos,release_dates,content_ratings",
                 "include_video_language": "en,ru,null",
             },

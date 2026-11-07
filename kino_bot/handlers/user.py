@@ -14,6 +14,7 @@ from aiogram.exceptions import TelegramBadRequest
 import archive
 import funnel
 import keyboards as kb
+import payments
 from database import Database
 from handlers.common import (
     build_anime_card_text,
@@ -72,7 +73,7 @@ async def cmd_start(message: Message, db: Database, state: FSMContext):
     if is_new_user and payload.startswith("ref_"):
         await register_from_payload(db, message.from_user.id, payload)
 
-    missing = await is_subscribed_to_all(message.bot, db, message.from_user.id)
+    missing = await is_subscribed_to_all(message.bot, db, message.from_user.id, use_cache=False)
     if missing:
         text, markup = build_subscribe_prompt(missing)
         await message.answer(text, reply_markup=markup)
@@ -130,7 +131,7 @@ async def _send_start_message(message: Message, db: Database, is_admin: bool):
 
 @router.callback_query(F.data == "check_subs")
 async def check_subs(call: CallbackQuery, db: Database):
-    missing = await is_subscribed_to_all(call.bot, db, call.from_user.id)
+    missing = await is_subscribed_to_all(call.bot, db, call.from_user.id, use_cache=False)
     if missing:
         await call.answer("❗ Hali barcha kanallarga obuna bo'lmadingiz.", show_alert=True)
         return
@@ -436,7 +437,7 @@ async def list_pagination(call: CallbackQuery, db: Database, state: FSMContext):
 # ------------------------------------------------------------------ #
 # Anime detali
 # ------------------------------------------------------------------ #
-async def _detail_markup(db: Database, anime, viewer_telegram_id: int, locked: bool = False):
+async def _detail_markup(db: Database, anime, viewer_telegram_id: int, locked: bool = False, bot: Bot | None = None):
     """Kino sahifasi tugmalari (sahifa ochilganda ham, sevimli/kuzatish bosilganda ham bir xil)."""
     anime_id = anime["id"]
     keys = anime.keys()
@@ -450,12 +451,14 @@ async def _detail_markup(db: Database, anime, viewer_telegram_id: int, locked: b
     if locked and await db.get_setting("preview_enabled", "1") != "1":
         trailer = None
     is_series = ("kind" in keys and anime["kind"] == "series")
+    share = await funnel.share_url(bot, anime) if bot is not None else None
     return kb.anime_detail_keyboard(
         anime_id, is_fav, is_following, bool(seasons), single_episode_id,
         locked=locked,
         has_versions=bool(versions),
         trailer_url=trailer,
         show_follow=bool(seasons) or ep_count > 1 or is_series,
+        share_url=share,
     )
 
 
@@ -465,15 +468,18 @@ async def show_anime_detail(message: Message, db: Database, anime_id: int, viewe
         await message.answer("Bu kino topilmadi (o'chirilgan bo'lishi mumkin).")
         return
 
-    # VIP kino, VIP bo'lmagan foydalanuvchi: karta (poster, tavsif, treyler) ko'rinadi, video qulflangan
-    locked = bool(anime["is_vip"]) and not await has_vip_access(db, viewer_telegram_id)
+    # VIP kino yoki yangi kino (erta kirish kechikishi): karta (poster, tavsif, treyler) ko'rinadi, video qulflangan
+    lock_reason, lock_note = await funnel.lock_info(db, viewer_telegram_id, anime)
+    locked = bool(lock_reason)
 
-    caption = await build_anime_card_text(db, anime, locked=locked)
-    if not locked:
+    caption = await build_anime_card_text(db, anime, locked=locked, lock_note=lock_note or None)
+    if locked:
+        await db.set_vip_trigger(viewer_telegram_id, anime_id, f"card_{lock_reason}")
+    else:
         quota = await funnel.free_quota_line(db, viewer_telegram_id)
         if quota:
             caption += f"\n\n{quota}"
-    markup = await _detail_markup(db, anime, viewer_telegram_id, locked=locked)
+    markup = await _detail_markup(db, anime, viewer_telegram_id, locked=locked, bot=message.bot)
     if anime["poster_file_id"]:
         try:
             await message.answer_photo(anime["poster_file_id"], caption=caption, reply_markup=markup)
@@ -518,9 +524,11 @@ async def _refresh_detail_markup(call: CallbackQuery, db: Database, anime_id: in
     anime = await db.get_anime(anime_id)
     if not anime:
         return
-    locked = bool(anime["is_vip"]) and not await has_vip_access(db, call.from_user.id)
+    lock_reason, _note = await funnel.lock_info(db, call.from_user.id, anime)
     try:
-        await call.message.edit_reply_markup(reply_markup=await _detail_markup(db, anime, call.from_user.id, locked))
+        await call.message.edit_reply_markup(
+            reply_markup=await _detail_markup(db, anime, call.from_user.id, bool(lock_reason), bot=call.bot)
+        )
     except TelegramBadRequest:
         pass
 
@@ -689,7 +697,7 @@ async def watch_episode(call: CallbackQuery, db: Database, bot: Bot):
     allowed, reason = await funnel.check_access(db, call.from_user.id, anime)
     if not allowed:
         await call.answer()
-        await funnel.send_vip_offer(bot, db, call.message.chat.id, call.from_user.id, reason, anime["title"])
+        await funnel.send_vip_offer(bot, db, call.message.chat.id, call.from_user.id, reason, anime["title"], anime_id=anime["id"])
         return
     await _send_episode(db, bot, call.from_user.id, anime, episode)
     await call.answer()
@@ -705,7 +713,7 @@ async def continue_watch(call: CallbackQuery, db: Database, bot: Bot):
     allowed, reason = await funnel.check_access(db, call.from_user.id, anime)
     if not allowed:
         await call.answer()
-        await funnel.send_vip_offer(bot, db, call.message.chat.id, call.from_user.id, reason, anime["title"])
+        await funnel.send_vip_offer(bot, db, call.message.chat.id, call.from_user.id, reason, anime["title"], anime_id=anime["id"])
         return
     progress = await db.get_watch_progress_for_anime(call.from_user.id, anime_id)
     if not progress:
@@ -782,7 +790,37 @@ async def vip_open(call: CallbackQuery, db: Database):
 
 @router.callback_query(F.data.startswith("vip_buy:"))
 async def vip_buy(call: CallbackQuery, db: Database, state: FSMContext):
+    """Tarif tanlandi: avtomatik usullar (karta/Stars) bo'lsa tanlov ko'rsatiladi, bo'lmasa — chek bilan to'lov."""
     months = int(call.data.split(":")[1])
+    m = await payments.available_methods(db, call.from_user.id, months)
+    auto = m["card"] or m["stars"] > 0
+    if not auto and m["manual"]:
+        await _start_manual_payment(call, db, state, months)
+        return
+    if not auto and not m["manual"]:
+        await call.answer("To'lov usullari hozircha sozlanmagan. Admin bilan bog'laning.", show_alert=True)
+        return
+    prices, discount = await funnel.get_prices(db, call.from_user.id)
+    note = f"\n🎉 Chegirma: -{discount}%" if discount else ""
+    await call.message.answer(
+        f"💎 <b>{months} oylik VIP — {fmt_number(m['price'])} so'm</b>{note}\n\nTo'lov usulini tanlang:",
+        reply_markup=kb.pay_methods_keyboard(
+            months, fmt_number(m["price"]) if m["card"] else None, m["stars"], m["manual"]
+        ),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.regexp(r"^pay:manual:[123]$"))
+async def pay_manual(call: CallbackQuery, db: Database, state: FSMContext):
+    months = int(call.data.split(":")[2])
+    if await db.get_setting("manual_pay_enabled", "1") != "1":
+        await call.answer("Bu usul o'chirilgan.", show_alert=True)
+        return
+    await _start_manual_payment(call, db, state, months)
+
+
+async def _start_manual_payment(call: CallbackQuery, db: Database, state: FSMContext, months: int):
     prices, discount = await funnel.get_prices(db, call.from_user.id)
     price = prices.get(months, 0)
     card_number = await db.get_setting("payment_card_number", "—")
@@ -950,15 +988,16 @@ async def versions_list(call: CallbackQuery, db: Database, bot: Bot):
     allowed, reason = await funnel.check_access(db, call.from_user.id, anime)
     if not allowed:
         await call.answer()
-        await funnel.send_vip_offer(bot, db, call.message.chat.id, call.from_user.id, reason, anime["title"])
+        await funnel.send_vip_offer(bot, db, call.message.chat.id, call.from_user.id, reason, anime["title"], anime_id=anime["id"])
         return
     versions = await db.list_versions(anime_id)
     if not versions:
         await call.answer("Variantlar topilmadi.", show_alert=True)
         return
+    locked_ids = {v["id"] for v in versions if await funnel.quality_locked(db, call.from_user.id, v)}
     await call.message.answer(
         f"🎙 <b>{anime['title']}</b>\nTil va sifatni tanlang:",
-        reply_markup=kb.versions_keyboard(anime_id, versions),
+        reply_markup=kb.versions_keyboard(anime_id, versions, locked_ids),
     )
     await call.answer()
 
@@ -976,13 +1015,21 @@ async def version_watch(call: CallbackQuery, db: Database, bot: Bot):
     allowed, reason = await funnel.check_access(db, call.from_user.id, anime)
     if not allowed:
         await call.answer()
-        await funnel.send_vip_offer(bot, db, call.message.chat.id, call.from_user.id, reason, anime["title"])
+        await funnel.send_vip_offer(bot, db, call.message.chat.id, call.from_user.id, reason, anime["title"], anime_id=anime["id"])
+        return
+    if await funnel.quality_locked(db, call.from_user.id, version):
+        await call.answer()
+        await funnel.send_vip_offer(
+            bot, db, call.message.chat.id, call.from_user.id, "quality", anime["title"],
+            anime_id=anime["id"], quality=version["quality"],
+        )
         return
     await archive.send_episode_video(
         bot, call.from_user.id, {"video_file_id": version["video_file_id"]},
         caption=f"🎬 {anime['title']}\n🎙 {version['label']}", protect=bool(anime["is_vip"]),
     )
     await db.log_watch(call.from_user.id, anime["id"], None)
+    await db.log_view_event(call.from_user.id, anime["id"], version["id"], version["quality"])
     if not await db.has_rated(anime["id"], call.from_user.id):
         await bot.send_message(
             call.from_user.id, "Ushbu kinoni baholashni unutmang 👇",
@@ -995,12 +1042,34 @@ async def version_watch(call: CallbackQuery, db: Database, bot: Bot):
 # ⚠️ Muammo haqida xabar
 # ------------------------------------------------------------------ #
 @router.callback_query(F.data.startswith("report:"))
-async def report_start(call: CallbackQuery, state: FSMContext):
+async def report_start(call: CallbackQuery, db: Database, state: FSMContext):
     anime_id = int(call.data.split(":")[1])
+    versions = await db.list_versions(anime_id)
+    if versions:
+        await call.message.answer(
+            "⚠️ Qaysi variantda muammo bor?", reply_markup=kb.report_variant_keyboard(anime_id, versions)
+        )
+        await call.answer()
+        return
+    await _ask_report_text(call, state, anime_id, "")
+
+
+@router.callback_query(F.data.startswith("repv:"))
+async def report_variant_chosen(call: CallbackQuery, db: Database, state: FSMContext):
+    _, anime_id, version_id = call.data.split(":")
+    label = ""
+    if int(version_id):
+        version = await db.get_version(int(version_id))
+        label = version["label"] if version else ""
+    await _ask_report_text(call, state, int(anime_id), label)
+
+
+async def _ask_report_text(call: CallbackQuery, state: FSMContext, anime_id: int, variant: str) -> None:
     await state.set_state(ReportStates.waiting_text)
-    await state.update_data(report_anime_id=anime_id)
+    await state.update_data(report_anime_id=anime_id, report_variant=variant)
+    where = f" ({variant})" if variant else ""
     await call.message.answer(
-        "⚠️ Muammoni qisqa yozing (masalan: «video ochilmayapti», «ovoz yo'q», «boshqa kino ketgan»):",
+        f"⚠️ Muammoni qisqa yozing{where} (masalan: «video ochilmayapti», «ovoz yo'q», «boshqa kino ketgan»):",
         reply_markup=kb.cancel_menu(),
     )
     await call.answer()
@@ -1010,8 +1079,11 @@ async def report_start(call: CallbackQuery, state: FSMContext):
 async def report_save(message: Message, db: Database, state: FSMContext, bot: Bot):
     data = await state.get_data()
     anime_id = data.get("report_anime_id")
+    variant = data.get("report_variant") or ""
     await state.clear()
     text = message.text.strip()
+    if variant:
+        text = f"[{variant}] {text}"
     report_id = await db.create_report(message.from_user.id, anime_id, text)
     user = await ensure_user(db, message.from_user)
     await message.answer(
@@ -1092,6 +1164,36 @@ async def request_wrong_type(message: Message):
 
 
 # ------------------------------------------------------------------ #
+# 🔔 Janrga obuna
+# ------------------------------------------------------------------ #
+GENRE_SUB_TEXT = (
+    "🔔 <b>Janrga obuna</b>\n\n"
+    "Sevimli janrlaringizni belgilang — shu janrda yangi kino chiqqanda sizga xabar beramiz.\n"
+    "💎 VIP foydalanuvchilarga xabar darhol, boshqalarga kino hamma uchun ochilganda boradi."
+)
+
+
+@router.message(F.text == "🔔 Janrga obuna")
+async def genre_sub_menu(message: Message, db: Database):
+    genres = await db.list_genres()
+    selected = await db.user_genre_subs(message.from_user.id)
+    await message.answer(GENRE_SUB_TEXT, reply_markup=kb.genre_sub_keyboard(genres, selected))
+
+
+@router.callback_query(F.data.regexp(r"^gsub:\d+$"))
+async def genre_sub_toggle(call: CallbackQuery, db: Database):
+    genre_id = int(call.data.split(":")[1])
+    on = await db.toggle_genre_sub(call.from_user.id, genre_id)
+    genres = await db.list_genres()
+    selected = await db.user_genre_subs(call.from_user.id)
+    try:
+        await call.message.edit_reply_markup(reply_markup=kb.genre_sub_keyboard(genres, selected))
+    except TelegramBadRequest:
+        pass
+    await call.answer("🔔 Obuna bo'ldingiz" if on else "🔕 Obuna bekor qilindi")
+
+
+# ------------------------------------------------------------------ #
 # Kod yoki nom yozib to'g'ridan-to'g'ri qidirish (menyuni bosmasdan)
 # MUHIM: bu handlerlar fayl OXIRIDA turishi kerak — avval menyu tugmalari tekshiriladi.
 # ------------------------------------------------------------------ #
@@ -1125,3 +1227,4 @@ async def quick_title(message: Message, db: Database, state: FSMContext):
         f"🔎 «{query}» bo'yicha natijalar:",
         reply_markup=kb.anime_list_keyboard(rows[:PER_PAGE], 0, total_pages, "search_title"),
     )
+

@@ -18,7 +18,9 @@ from aiogram.types import CallbackQuery, Message
 import alerts
 import archive
 import backup_service
+import announce
 import config
+from kino_db import detect_quality
 import keyboards as kb
 from database import Database, validate_sqlite_backup
 from handlers import user as user_handlers
@@ -478,6 +480,9 @@ async def add_episode_video(message: Message, state: FSMContext, bot: Bot):
         videos: list[str] = list(data.get("episode_videos", []))
         videos.append(message.video.file_id)
         await state.update_data(episode_videos=videos)
+        if not data.get("episode_quality"):
+            # Sifatni video o'lchamidan bot o'zi aniqlaydi (birinchi video bo'yicha)
+            await state.update_data(episode_quality=detect_quality(message.video.width, message.video.height))
     gen = _bump_status_gen(uid)
     asyncio.create_task(_send_upload_status(bot, state, message.chat.id, uid, gen))
 
@@ -598,6 +603,7 @@ async def add_episode_done(call: CallbackQuery, state: FSMContext, db: Database,
         season_id = data.get("episode_season_id")
         videos: list[str] = list(data.get("episode_videos", []))
         old_status = data.get("episode_status_msg_id")
+        episode_quality = data.get("episode_quality")
         await state.clear()
 
     if old_status:
@@ -626,9 +632,16 @@ async def add_episode_done(call: CallbackQuery, state: FSMContext, db: Database,
             real_episode_ids.append(last_episode["id"])
 
     filler_txt = f" (shundan {filler_count} ta filler)" if filler_count else ""
+    quality_txt = ""
+    if episode_quality and real_episode_ids:
+        anime_now = await db.get_anime(anime_id)
+        if anime_now and not anime_now["quality"]:
+            # Kartadagi «📀 Sifat» qatori avtomatik to'ldiriladi (qo'lda kiritilgan bo'lsa tegilmaydi)
+            await db.update_anime_field(anime_id, "quality", f"{episode_quality}p")
+        quality_txt = f"\n📀 Sifat avtomatik aniqlandi: {episode_quality}p"
     await call.message.answer(
         f"✅ {len(videos)} ta qism saqlandi{filler_txt} "
-        f"(oxirgi qo'shilgani: {last_episode['episode_number']}-qism)."
+        f"(oxirgi qo'shilgani: {last_episode['episode_number']}-qism).{quality_txt}"
     )
     await _return_after_episode_upload(call.message, db, anime_id, season_id)
 
@@ -761,39 +774,27 @@ async def add_episode_season_start(call: CallbackQuery, state: FSMContext, db: D
 @router.callback_query(F.data.startswith("adm:announce:"))
 async def announce_anime(call: CallbackQuery, db: Database, bot: Bot):
     anime_id = int(call.data.split(":")[2])
-    if not config.MAIN_CHANNEL:
-        await call.answer("MAIN_CHANNEL .env faylida sozlanmagan.", show_alert=True)
+    if not await db.list_announce_channels(only_enabled=True):
+        await call.answer(
+            "Avval kanal ulang: Admin panel → 📣 E'lon kanallari.", show_alert=True
+        )
         return
-    ok = await _post_announcement(bot, db, anime_id)
-    await call.answer("📢 Kanalga e'lon qilindi!" if ok else "❌ Xatolik yuz berdi.", show_alert=True)
+    await call.answer("Yuborilmoqda...")
+    res = await announce.post_anime(bot, db, anime_id)
+    lines = []
+    if res.sent:
+        lines.append("📢 Yuborildi: " + ", ".join(res.sent))
+    for title, err in res.failed:
+        lines.append(f"❌ {title}: {err}")
+    if not lines:
+        lines.append("❌ Kino topilmadi.")
+    await call.message.answer("\n".join(lines))
 
 
 async def _post_announcement(bot: Bot, db: Database, anime_id: int) -> bool:
-    anime = await db.get_anime(anime_id)
-    if not anime:
-        return False
-    # Anime kartasi matni — xuddi anime sahifasidagi bilan bir xil, bitta umumiy
-    # funksiyadan (qarang: handlers.common.build_anime_card_text).
-    caption = await build_anime_card_text(db, anime)
-    # MUHIM: bu tugma yangi ko'rish tizimi yaratmaydi — u shunchaki botni
-    # deep-link bilan ochadi, so'ng BOTDAGI MAVJUD /start -> majburiy obuna ->
-    # VIP tekshiruvi -> anime sahifasi oqimi (cmd_start ichidagi "anime_<code>"
-    # filiali) ishlaydi, xuddi foydalanuvchi botda "Anime ID" orqali qidirgandek.
-    markup = await build_announcement_markup(bot, anime)
-    try:
-        if anime["poster_file_id"]:
-            sent = await bot.send_photo(config.MAIN_CHANNEL, anime["poster_file_id"], caption=caption, reply_markup=markup)
-        else:
-            sent = await bot.send_message(config.MAIN_CHANNEL, caption, reply_markup=markup)
-        try:
-            # Xabar ID'sini saqlaymiz: keyin reyting o'zgarsa, shu e'lonni tahrirlaymiz
-            await db.set_channel_message_id(anime_id, sent.message_id)
-        except Exception:
-            logger.exception("Kanal xabari ID'sini saqlashda xatolik")
-        return True
-    except Exception:
-        logger.exception("Kanalga e'lon qilishda xatolik")
-        return False
+    """Eski nom (boshqa modullar chaqiradi): barcha yoqilgan kanallarga e'lon."""
+    res = await announce.post_anime(bot, db, anime_id)
+    return res.ok
 
 
 # ------------------------------------------------------------------ #
@@ -946,6 +947,7 @@ async def pay_approve(call: CallbackQuery, db: Database, bot: Bot):
         approved_by=call.from_user.id,
     )
     await db.resolve_payment(payment_id, "approved", call.from_user.id)
+    await db.attribute_last_purchase(user["telegram_id"])  # qaysi kino VIP sotishga sabab bo'lgani statistikasi
     try:
         await call.message.edit_caption(caption=(call.message.caption or "") + "\n\n✅ TASDIQLANDI")
     except TelegramBadRequest:

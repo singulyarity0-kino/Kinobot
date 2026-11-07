@@ -20,10 +20,12 @@ import alerts
 import archive  # noqa: F401  (video zaxira kanali)
 import backup_service
 import config
+import announce
 import funnel
+import payments
 from button_style import ButtonColorMiddleware
 from database import Database
-from handlers import admin, admin_kino, admin_more, tmdb_ui, backup_ui, discover, referral_ui, user
+from handlers import admin, admin_channels, admin_kino, admin_more, tmdb_ui, backup_ui, discover, referral_ui, user
 from handlers.common import SubscriptionMiddleware
 
 logger = logging.getLogger("anime_bot")
@@ -63,43 +65,6 @@ async def vip_expiry_watcher(bot: Bot, db: Database) -> None:
         await asyncio.sleep(600)
 
 
-async def daily_random_announcement(bot: Bot, db: Database) -> None:
-    """
-    Har kuni admin paneldan belgilangan vaqtda (O'zbekiston vaqti) tasodifiy kino e'loni yuboriladi.
-    Har 30 soniyada tekshiriladi; kuniga bir marta; bot belgilangan vaqtdan keyin 3 soat ichida
-    uyg'onsa ham yuboradi (Render uxlab qolgan holat uchun).
-    """
-    from handlers.admin import _post_announcement
-    from handlers.common import parse_hhmm
-
-    while True:
-        await asyncio.sleep(30)
-        try:
-            if not config.MAIN_CHANNEL:
-                continue
-            if await db.get_setting("daily_post_enabled", "1") != "1":
-                continue
-            now = datetime.datetime.now(config.LOCAL_TZ)
-            today = now.strftime("%Y-%m-%d")
-            if await db.get_setting("daily_post_last_date", "") == today:
-                continue
-            hhmm = parse_hhmm(await db.get_setting("daily_post_time", "12:00")) or "12:00"
-            hour, minute = int(hhmm[:2]), int(hhmm[3:])
-            scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if now < scheduled or now - scheduled > datetime.timedelta(hours=3):
-                continue
-            # Avval belgilab olamiz — xatolik bo'lsa ham bir kunda qayta-qayta urinmaydi
-            await db.set_setting("daily_post_last_date", today)
-            rows = await db.all_anime_for_random()
-            if not rows:
-                continue
-            anime = random.choice(rows)
-            await _post_announcement(bot, db, anime["id"])
-            logger.info("Kunlik random kino e'loni yuborildi: %s", anime["title"])
-        except Exception as e:
-            await alerts.report(bot, "daily_random_announcement", e)
-
-
 def main() -> None:
     setup_logging()
 
@@ -135,11 +100,13 @@ def main() -> None:
     dp.include_router(admin.router)
     dp.include_router(admin_more.router)
     dp.include_router(admin_kino.router)
+    dp.include_router(admin_channels.router)
     dp.include_router(tmdb_ui.router)
     dp.include_router(backup_ui.router)
     dp.include_router(referral_ui.admin_router)
     dp.include_router(referral_ui.router)
     dp.include_router(discover.router)
+    dp.include_router(payments.router)
     dp.include_router(user.router)
 
     # Kutilmagan xatolar haqida SUPER_ADMIN_IDS ga xabar (bir xil xato 10 daqiqada bir marta)
@@ -164,7 +131,9 @@ def main() -> None:
             asyncio.create_task(funnel.vip_reminder_watcher(bot, db)),
             asyncio.create_task(backup.scheduler_loop()),
             asyncio.create_task(backup.startup_check()),
-            asyncio.create_task(daily_random_announcement(bot, db)),
+            asyncio.create_task(announce.daily_announcer(bot, db)),
+            asyncio.create_task(announce.scheduled_poster(bot, db)),
+            asyncio.create_task(announce.unlock_notifier(bot, db)),
         ])
 
     async def on_cleanup(app: web.Application) -> None:
